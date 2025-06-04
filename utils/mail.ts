@@ -1,5 +1,5 @@
-import { run } from "@jxa/run";
-import { runAppleScript } from "run-applescript";
+import Fuse from "fuse.js"
+import { runAppleScript } from "run-applescript"
 
 async function checkMailAccess(): Promise<boolean> {
   try {
@@ -7,669 +7,706 @@ async function checkMailAccess(): Promise<boolean> {
     const isRunning = await runAppleScript(`
 tell application "System Events"
     return application process "Mail" exists
-end tell`);
+end tell`)
 
     if (isRunning !== "true") {
-      console.error("Mail app is not running, attempting to launch...");
+      console.error("Mail app is not running, attempting to launch...")
       try {
         await runAppleScript(`
 tell application "Mail" to activate
-delay 2`);
+delay 2`)
       } catch (activateError) {
-        console.error("Error activating Mail app:", activateError);
-        throw new Error(
-          "Could not activate Mail app. Please start it manually.",
-        );
+        console.error("Error activating Mail app:", activateError)
+        throw new Error("Could not activate Mail app. Please start it manually.")
       }
     }
 
-    // Try to get the count of mailboxes as a simple test
-    try {
-      await runAppleScript(`
-tell application "Mail"
-    count every mailbox
-end tell`);
-      return true;
-    } catch (mailboxError) {
-      console.error("Error accessing mailboxes:", mailboxError);
+    //     // Try to get the count of mailboxes as a simple test
+    //     try {
+    //       await runAppleScript(`
+    // tell application "Mail"
+    //     count every mailbox
+    // end tell`)
+    //       return true
+    //     } catch (mailboxError) {
+    //       console.error("Error accessing mailboxes:", mailboxError)
 
-      // Try an alternative check
-      try {
-        const mailVersion = await runAppleScript(`
-tell application "Mail"
-    return its version
-end tell`);
-        console.error("Mail version:", mailVersion);
-        return true;
-      } catch (versionError) {
-        console.error("Error getting Mail version:", versionError);
-        throw new Error(
-          "Mail app is running but cannot access mailboxes. Please check permissions and configuration.",
-        );
-      }
-    }
+    //       // Try an alternative check
+    //       try {
+    //         const mailVersion = await runAppleScript(`
+    // tell application "Mail"
+    //     return its version
+    // end tell`)
+    //         console.error("Mail version:", mailVersion)
+    //         return true
+    //       } catch (versionError) {
+    //         console.error("Error getting Mail version:", versionError)
+    //         throw new Error(
+    //           "Mail app is running but cannot access mailboxes. Please check permissions and configuration.",
+    //         )
+    //       }
+    //     }
+    return true
   } catch (error) {
-    console.error("Mail access check failed:", error);
+    console.error("Mail access check failed:", error)
     throw new Error(
       `Cannot access Mail app. Please make sure Mail is running and properly configured. Error: ${error instanceof Error ? error.message : String(error)}`,
-    );
+    )
   }
 }
 
 interface EmailMessage {
+  account?: string;
+  mailbox?: string;
+  messageId: string;
   subject: string;
   sender: string;
-  dateSent: string;
-  content: string;
-  isRead: boolean;
-  mailbox: string;
+  dateReceived?: string; // Keep as string from AppleScript, will parse to Date later
+  isRead?: boolean;
+  isFlagged?: boolean;
+  content?: string; // For readEmail
 }
 
-async function getUnreadMails(limit = 10): Promise<EmailMessage[]> {
+interface ListEmailsParams {
+  searchTerm?: string;
+  limit?: number;
+  accountName?: string;
+  mailboxName?: string;
+  isRead?: boolean;
+  isFlagged?: boolean;
+}
+
+async function createDraftEmail(
+  isReply: boolean,
+  originalMessageId: string | null,
+  toAddress: string | null,
+  subjectText: string,
+  bodyText: string,
+  attachmentPath: string | null,
+): Promise<{ success: boolean; message: string; draftId?: string }> {
   try {
     if (!(await checkMailAccess())) {
-      return [];
+      return { success: false, message: "Mail app not accessible." }
     }
 
-    // First, try with AppleScript which might be more reliable for this case
-    try {
-      const script = `
-tell application "Mail"
-    set allMailboxes to every mailbox
-    set resultList to {}
-
-    repeat with m in allMailboxes
-        try
-            set unreadMessages to (messages of m whose read status is false)
-            if (count of unreadMessages) > 0 then
-                set msgLimit to ${limit}
-                if (count of unreadMessages) < msgLimit then
-                    set msgLimit to (count of unreadMessages)
-                end if
-
-                repeat with i from 1 to msgLimit
+    const script = `
+on createDraftEmail(isReply, originalMessageId, toAddress, subjectText, bodyText, attachmentPath)
+    tell application "Mail"
+        activate
+        set theDraft to missing value
+        if isReply is true then
+            if originalMessageId is "" or originalMessageId is missing value then
+                return {success:false, message:"Original message ID is required for a reply."}
+            end if
+            set foundMessage to missing value
+            set allAccounts to every account
+            repeat with currentAccount in allAccounts
+                if foundMessage is not missing value then exit repeat
+                set allMailboxes to every mailbox of currentAccount
+                repeat with mbox in allMailboxes
+                    if foundMessage is not missing value then exit repeat
                     try
-                        set currentMsg to item i of unreadMessages
-                        set msgData to {subject:(subject of currentMsg), sender:(sender of currentMsg), ¬
-                                        date:(date sent of currentMsg) as string, mailbox:(name of m)}
-
-                        try
-                            set msgContent to content of currentMsg
-                            if length of msgContent > 500 then
-                                set msgContent to (text 1 thru 500 of msgContent) & "..."
-                            end if
-                            set msgData to msgData & {content:msgContent}
-                        on error
-                            set msgData to msgData & {content:"[Content not available]"}
-                        end try
-
-                        set end of resultList to msgData
+                        set msgs to messages of mbox whose id is originalMessageId
+                        if (count of msgs) > 0 then
+                            set foundMessage to item 1 of msgs
+                            exit repeat
+                        end if
                     end try
                 end repeat
-
-                if (count of resultList) ≥ ${limit} then exit repeat
+            end repeat
+            
+            if foundMessage is missing value then
+                return {success:false, message:"Could not find original message with ID: " & originalMessageId}
             end if
-        end try
-    end repeat
+            set theDraft to reply foundMessage with opening window
+            set content of theDraft to bodyText & return & return & content of theDraft
+        else
+            set theDraft to make new outgoing message with properties {visible:true, subject:subjectText, content:bodyText}
+            if toAddress is not "" and toAddress is not missing value then
+                make new to recipient at theDraft with properties {address:toAddress}
+            end if
+        end if
+        
+        if attachmentPath is not "" and attachmentPath is not missing value then
+            try
+                set attachmentFile to POSIX file attachmentPath
+                make new attachment at theDraft with properties {file name:attachmentFile}
+            on error errMsg
+                return {success:false, message:"Attachment error: " & errMsg}
+            end try
+        end if
+        
+        delay 0.5 -- Give Mail a moment to save
+        return {success:true, message:"Draft created successfully.", draftId:id of theDraft}
+    end tell
+end createDraftEmail
 
-    return resultList
-end tell`;
-
-      const asResult = await runAppleScript(script);
-
-      // If we got results, parse them
-      if (asResult && asResult.toString().trim().length > 0) {
-        try {
-          // Try to parse as JSON if the result looks like JSON
-          if (asResult.startsWith("{") || asResult.startsWith("[")) {
-            const parsedResults = JSON.parse(asResult);
-            if (Array.isArray(parsedResults) && parsedResults.length > 0) {
-              return parsedResults.map((msg) => ({
-                subject: msg.subject || "No subject",
-                sender: msg.sender || "Unknown sender",
-                dateSent: msg.date || new Date().toString(),
-                content: msg.content || "[Content not available]",
-                isRead: false, // These are all unread by definition
-                mailbox: msg.mailbox || "Unknown mailbox",
-              }));
-            }
-          }
-
-          // If it's not in JSON format, try to parse the plist/record format
-          const parsedEmails: EmailMessage[] = [];
-
-          // Very simple parsing for the record format that AppleScript might return
-          // This is a best-effort attempt and might not be perfect
-          const matches = asResult.match(/\{([^}]+)\}/g);
-          if (matches && matches.length > 0) {
-            for (const match of matches) {
-              try {
-                // Parse key-value pairs
-                const props = match.substring(1, match.length - 1).split(",");
-                const emailData: { [key: string]: string } = {};
-
-                for (const prop of props) {
-                  const parts = prop.split(":");
-                  if (parts.length >= 2) {
-                    const key = parts[0].trim();
-                    const value = parts.slice(1).join(":").trim();
-                    emailData[key] = value;
-                  }
-                }
-
-                if (emailData.subject || emailData.sender) {
-                  parsedEmails.push({
-                    subject: emailData.subject || "No subject",
-                    sender: emailData.sender || "Unknown sender",
-                    dateSent: emailData.date || new Date().toString(),
-                    content: emailData.content || "[Content not available]",
-                    isRead: false,
-                    mailbox: emailData.mailbox || "Unknown mailbox",
-                  });
-                }
-              } catch (parseError) {
-                console.error("Error parsing email match:", parseError);
-              }
-            }
-          }
-
-          if (parsedEmails.length > 0) {
-            return parsedEmails;
-          }
-        } catch (parseError) {
-          console.error("Error parsing AppleScript result:", parseError);
-          // If parsing failed, continue to the JXA approach
-        }
+return createDraftEmail(${isReply}, "${originalMessageId || ""}", "${toAddress || ""}", "${subjectText.replace(/"/g, '\\"')}", "${bodyText.replace(/"/g, '\\"')}", "${attachmentPath || ""}")
+`
+    const resultString = await runAppleScript(script)
+    // AppleScript might return a string representation of a record
+    // We need to parse this carefully or rely on specific success/error messages.
+    // For simplicity, let's assume the script returns a string that we can parse or check.
+    // A more robust solution would be to have AppleScript return JSON.
+    if (resultString.includes("success:true")) {
+      let draftId
+      const idMatch = resultString.match(/draftId:"([^"]+)"/)
+      if (idMatch && idMatch[1]) {
+        draftId = idMatch[1]
       }
-
-      // If the raw result contains useful info but parsing failed
-      if (
-        asResult.includes("subject") &&
-        asResult.includes("sender")
-      ) {
-        console.error("Returning raw AppleScript result for debugging");
-        return [
-          {
-            subject: "Raw AppleScript Output",
-            sender: "Mail System",
-            dateSent: new Date().toString(),
-            content: `Could not parse Mail data properly. Raw output: ${asResult}`,
-            isRead: false,
-            mailbox: "Debug",
-          },
-        ];
-      }
-    } catch (asError) {
-      // Continue to JXA approach as fallback
+      return { success: true, message: "Draft created successfully.", draftId }
+    } else if (resultString.includes("success:false")) {
+      const messageMatch = resultString.match(/message:"([^"]+)"/)
+      const message = messageMatch ? messageMatch[1] : "Failed to create draft."
+      return { success: false, message }
     }
-
-    console.error("Trying JXA approach for unread emails...");
-    // Check Mail accounts as a different approach
-    const accounts = await runAppleScript(`
-tell application "Mail"
-    set accts to {}
-    repeat with a in accounts
-        set end of accts to name of a
-    end repeat
-    return accts
-end tell`);
-    console.error("Available accounts:", accounts);
-
-    // Try using direct AppleScript to check for unread messages across all accounts
-    const unreadInfo = await runAppleScript(`
-tell application "Mail"
-    set unreadInfo to {}
-    repeat with m in every mailbox
-        try
-            set unreadCount to count (messages of m whose read status is false)
-            if unreadCount > 0 then
-                set end of unreadInfo to {name of m, unreadCount}
-            end if
-        end try
-    end repeat
-    return unreadInfo
-end tell`);
-    console.error("Mailboxes with unread messages:", unreadInfo);
-
-    // Fallback to JXA approach
-    const unreadMails: EmailMessage[] = await run((limit: number) => {
-      const Mail = Application("Mail");
-      const results = [];
-
-      try {
-        const accounts = Mail.accounts();
-
-        for (const account of accounts) {
-          try {
-            const accountName = account.name();
-            try {
-              const accountMailboxes = account.mailboxes();
-
-              for (const mailbox of accountMailboxes) {
-                try {
-                  const boxName = mailbox.name();
-
-                  // biome-ignore lint/suspicious/noImplicitAnyLet: <explanation>
-                  let unreadMessages;
-                  try {
-                    unreadMessages = mailbox.messages.whose({
-                      readStatus: false,
-                    })();
-
-                    const count = Math.min(
-                      unreadMessages.length,
-                      limit - results.length,
-                    );
-                    for (let i = 0; i < count; i++) {
-                      try {
-                        const msg = unreadMessages[i];
-                        results.push({
-                          subject: msg.subject(),
-                          sender: msg.sender(),
-                          dateSent: msg.dateSent().toString(),
-                          content: msg.content()
-                            ? msg.content().substring(0, 500)
-                            : "[No content]",
-                          isRead: false,
-                          mailbox: `${accountName} - ${boxName}`,
-                        });
-                      } catch (msgError) {}
-                    }
-                  } catch (unreadError) {}
-                } catch (boxError) {}
-
-                if (results.length >= limit) {
-                  break;
-                }
-              }
-            } catch (mbError) {}
-
-            if (results.length >= limit) {
-              break;
-            }
-          } catch (accError) {}
-        }
-      } catch (error) {}
-
-      return results;
-    }, limit);
-
-    return unreadMails;
+    // Fallback for unexpected AppleScript output
+    return { success: false, message: `Unexpected result from AppleScript: ${resultString}` }
   } catch (error) {
-    console.error("Error in getUnreadMails:", error);
-    throw new Error(
-      `Error accessing mail: ${error instanceof Error ? error.message : String(error)}`,
-    );
+    console.error("Error in createDraftEmail:", error)
+    return {
+      success: false,
+      message: `Error creating draft email: ${error instanceof Error ? error.message : String(error)}`,
+    }
   }
 }
 
-async function searchMails(
-  searchTerm: string,
-  limit = 10,
-): Promise<EmailMessage[]> {
+async function listEmails({
+  searchTerm,
+  limit = 25,
+  accountName: targetAccountName,
+  mailboxName: targetMailboxName,
+  isRead: filterIsRead,
+  isFlagged: filterIsFlagged,
+}: ListEmailsParams): Promise<EmailMessage[]> {
   try {
     if (!(await checkMailAccess())) {
       return [];
     }
 
-    // Ensure Mail app is running
-    await runAppleScript(`
-if application "Mail" is not running then
-    tell application "Mail" to activate
-    delay 2
-end if`);
-
-    // First try the AppleScript approach which might be more reliable
-    try {
+    const getEmailsFromMailbox = async (
+      account: string,
+      mailbox: string,
+    ): Promise<EmailMessage[]> => {
+      // This script is based on the user's apple-scripts/list-emails.applescript
+      // but modified to output JSON for robust parsing and to set the message limit.
       const script = `
-tell application "Mail"
-    set searchString to "${searchTerm.replace(/"/g, '\\"')}"
-    set foundMsgs to {}
-    set allBoxes to every mailbox
-
-    repeat with currentBox in allBoxes
+on listEmailsInMailbox(targetAccountNameStr, targetMailboxNameStr)
+    set emailJsonList to {}
+    tell application "Mail"
         try
-            set boxMsgs to (messages of currentBox whose (subject contains searchString) or (content contains searchString))
-            set foundMsgs to foundMsgs & boxMsgs
-            if (count of foundMsgs) ≥ ${limit} then exit repeat
+            set theAccount to account targetAccountNameStr
+            if not (exists theAccount) then error "Account '" & targetAccountNameStr & "' not found."
+            if not (enabled of theAccount) then error "Account '" & targetAccountNameStr & "' is not enabled."
+
+            set theMailbox to mailbox targetMailboxNameStr of theAccount
+            if not (exists theMailbox) then error "Mailbox '" & targetMailboxNameStr & "' not found in account '" & targetAccountNameStr & "'."
+            
+            set allMessageReferencesInMailbox to messages of theMailbox
+            set messageCount to count of allMessageReferencesInMailbox
+            set messagesToProcess to {}
+            
+            if messageCount > 0 then
+                if messageCount > 200 then -- User specified limit for AppleScript part
+                    set messagesToProcess to (messages 1 thru 200 of theMailbox)
+                else
+                    set messagesToProcess to allMessageReferencesInMailbox
+                end if
+            else
+                return "[]" -- Return empty JSON array string
+            end if
+            
+            repeat with msg in messagesToProcess
+                try
+                    set msgId to id of msg
+                    set msgSubject to subject of msg
+                    set msgSender to sender of msg
+                    set msgDateReceived to (date received of msg) as string
+                    set msgIsRead to read status of msg
+                    set msgIsFlagged to flagged status of msg
+                    
+                    -- Escape characters for JSON string
+                    set msgSubject to escapeJsonString(msgSubject)
+                    set msgSender to escapeJsonString(msgSender)
+                    set msgDateReceived to escapeJsonString(msgDateReceived)
+                    
+                    set emailJson to "{ \\"account\\": \\"" & targetAccountNameStr & "\\", " & ¬
+                                      "\\"mailbox\\": \\"" & targetMailboxNameStr & "\\", " & ¬
+                                      "\\"messageId\\": \\"" & msgId & "\\", " & ¬
+                                      "\\"subject\\": \\"" & msgSubject & "\\", " & ¬
+                                      "\\"sender\\": \\"" & msgSender & "\\", " & ¬
+                                      "\\"dateReceived\\": \\"" & msgDateReceived & "\\", " & ¬
+                                      "\\"isRead\\": " & msgIsRead & ", " & ¬
+                                      "\\"isFlagged\\": " & msgIsFlagged & " }"
+                    set end of emailJsonList to emailJson
+                on error errMsgInner
+                    -- log "Error processing a message: " & errMsgInner
+                end try
+            end repeat
+        on error errMsg
+            -- log "Error in listEmailsInMailbox: " & errMsg
+            return "[]" -- Return empty JSON array string on error
         end try
-    end repeat
+    end tell
+    
+    set AppleScript's text item delimiters to ","
+    set jsonArrayString to "[" & (emailJsonList as string) & "]"
+    set AppleScript's text item delimiters to "" -- Reset delimiters
+    return jsonArrayString
+end listEmailsInMailbox
 
-    set resultList to {}
-    set msgCount to (count of foundMsgs)
-    if msgCount > ${limit} then set msgCount to ${limit}
+on escapeJsonString(inputString)
+    if inputString is missing value then return ""
+    set tempString to inputString
+    set AppleScript's text item delimiters to "\\\\"
+    set tempString to text items of tempString
+    set AppleScript's text item delimiters to "\\\\\\\\" -- escape backslash
+    set tempString to tempString as string
+    
+    set AppleScript's text item delimiters to "\\""
+    set tempString to text items of tempString
+    set AppleScript's text item delimiters to "\\\\\\"" -- escape double quote
+    set tempString to tempString as string
+    
+    set AppleScript's text item delimiters to "/"
+    set tempString to text items of tempString
+    set AppleScript's text item delimiters to "\\\\/" -- escape slash
+    set tempString to tempString as string
+    
+    set AppleScript's text item delimiters to "\\b"
+    set tempString to text items of tempString
+    set AppleScript's text item delimiters to "\\\\b"
+    set tempString to tempString as string
+    
+    set AppleScript's text item delimiters to "\\f"
+    set tempString to text items of tempString
+    set AppleScript's text item delimiters to "\\\\f"
+    set tempString to tempString as string
+    
+    set AppleScript's text item delimiters to "\\n"
+    set tempString to text items of tempString
+    set AppleScript's text item delimiters to "\\\\n"
+    set tempString to tempString as string
+    
+    set AppleScript's text item delimiters to "\\r"
+    set tempString to text items of tempString
+    set AppleScript's text item delimiters to "\\\\r"
+    set tempString to tempString as string
+    
+    set AppleScript's text item delimiters to "\\t"
+    set tempString to text items of tempString
+    set AppleScript's text item delimiters to "\\\\t"
+    set tempString to tempString as string
+    
+    set AppleScript's text item delimiters to "" -- Reset
+    return tempString
+end escapeJsonString
 
-    repeat with i from 1 to msgCount
-        try
-            set currentMsg to item i of foundMsgs
-            set msgInfo to {subject:subject of currentMsg, sender:sender of currentMsg, ¬
-                            date:(date sent of currentMsg) as string, isRead:read status of currentMsg, ¬
-                            boxName:name of (mailbox of currentMsg)}
-            set end of resultList to msgInfo
-        end try
-    end repeat
-
-    return resultList
-end tell`;
-
-      const asResult = await runAppleScript(script);
-
-      // If we got results, parse them
-      if (asResult && asResult.length > 0) {
-        try {
-          const parsedResults = JSON.parse(asResult);
-          if (Array.isArray(parsedResults) && parsedResults.length > 0) {
-            return parsedResults.map((msg) => ({
-              subject: msg.subject || "No subject",
-              sender: msg.sender || "Unknown sender",
-              dateSent: msg.date || new Date().toString(),
-              content: "[Content not available through AppleScript method]",
-              isRead: msg.isRead || false,
-              mailbox: msg.boxName || "Unknown mailbox",
-            }));
-          }
-        } catch (parseError) {
-          console.error("Error parsing AppleScript result:", parseError);
-          // Continue to JXA approach if parsing fails
-        }
-      }
-    } catch (asError) {
-      // Continue to JXA approach
-    }
-
-    // JXA approach as fallback
-    const searchResults: EmailMessage[] = await run(
-      (searchTerm: string, limit: number) => {
-        const Mail = Application("Mail");
-        const results = [];
-
-        try {
-          const mailboxes = Mail.mailboxes();
-
-          for (const mailbox of mailboxes) {
-            try {
-              // biome-ignore lint/suspicious/noImplicitAnyLet: <explanation>
-              let messages;
-              try {
-                messages = mailbox.messages.whose({
-                  _or: [
-                    { subject: { _contains: searchTerm } },
-                    { content: { _contains: searchTerm } },
-                  ],
-                })();
-
-                const count = Math.min(messages.length, limit);
-
-                for (let i = 0; i < count; i++) {
-                  try {
-                    const msg = messages[i];
-                    results.push({
-                      subject: msg.subject(),
-                      sender: msg.sender(),
-                      dateSent: msg.dateSent().toString(),
-                      content: msg.content()
-                        ? msg.content().substring(0, 500)
-                        : "[No content]", // Limit content length
-                      isRead: msg.readStatus(),
-                      mailbox: mailbox.name(),
-                    });
-                  } catch (msgError) {}
-                }
-
-                if (results.length >= limit) {
-                  break;
-                }
-              } catch (queryError) {
-              }
-            } catch (boxError) {}
-          }
-        } catch (mbError) {}
-
-        return results.slice(0, limit);
-      },
-      searchTerm,
-      limit,
-    );
-
-    return searchResults;
-  } catch (error) {
-    console.error("Error in searchMails:", error);
-    throw new Error(
-      `Error searching mail: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-}
-
-async function sendMail(
-  to: string,
-  subject: string,
-  body: string,
-  cc?: string,
-  bcc?: string,
-): Promise<string | undefined> {
-  try {
-    if (!(await checkMailAccess())) {
-      throw new Error("Could not access Mail app");
-    }
-
-    // Ensure Mail app is running
-    await runAppleScript(`
-if application "Mail" is not running then
-    tell application "Mail" to activate
-    delay 2
-end if`);
-
-    // Escape special characters in strings for AppleScript
-    const escapedTo = to.replace(/"/g, '\\"');
-    const escapedSubject = subject.replace(/"/g, '\\"');
-    const escapedBody = body.replace(/"/g, '\\"');
-    const escapedCc = cc ? cc.replace(/"/g, '\\"') : "";
-    const escapedBcc = bcc ? bcc.replace(/"/g, '\\"') : "";
-
-    let script = `
-tell application "Mail"
-    set newMessage to make new outgoing message with properties {subject:"${escapedSubject}", content:"${escapedBody}", visible:true}
-    tell newMessage
-        make new to recipient with properties {address:"${escapedTo}"}
+return listEmailsInMailbox("${account.replace(/"/g, '\\"')}", "${mailbox.replace(/"/g, '\\"')}")
 `;
-
-    if (cc) {
-      script += `        make new cc recipient with properties {address:"${escapedCc}"}\n`;
-    }
-
-    if (bcc) {
-      script += `        make new bcc recipient with properties {address:"${escapedBcc}"}\n`;
-    }
-
-    script += `    end tell
-    send newMessage
-    return "success"
-end tell
-`;
-
-    try {
-      const result = await runAppleScript(script);
-      if (result === "success") {
-        return `Email sent to ${to} with subject "${subject}"`;
-      // biome-ignore lint/style/noUselessElse: <explanation>
-      } else {
-      }
-    } catch (asError) {
-      console.error("Error in AppleScript send:", asError);
-
-      const jxaResult: string = await run(
-        (to, subject, body, cc, bcc) => {
-          try {
-            const Mail = Application("Mail");
-
-            const msg = Mail.OutgoingMessage().make();
-            msg.subject = subject;
-            msg.content = body;
-            msg.visible = true;
-
-            // Add recipients
-            const toRecipient = Mail.ToRecipient().make();
-            toRecipient.address = to;
-            msg.toRecipients.push(toRecipient);
-
-            if (cc) {
-              const ccRecipient = Mail.CcRecipient().make();
-              ccRecipient.address = cc;
-              msg.ccRecipients.push(ccRecipient);
-            }
-
-            if (bcc) {
-              const bccRecipient = Mail.BccRecipient().make();
-              bccRecipient.address = bcc;
-              msg.bccRecipients.push(bccRecipient);
-            }
-
-            msg.send();
-            return "JXA send completed";
-          } catch (error) {
-            return `JXA error: ${error}`;
-          }
-        },
-        to,
-        subject,
-        body,
-        cc,
-        bcc,
-      );
-
-      if (jxaResult.startsWith("JXA error:")) {
-        throw new Error(jxaResult);
-      }
-
-      return `Email sent to ${to} with subject "${subject}"`;
-    }
-  } catch (error) {
-    console.error("Error in sendMail:", error);
-    throw new Error(
-      `Error sending mail: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-}
-
-async function getMailboxes(): Promise<string[]> {
-  try {
-    if (!(await checkMailAccess())) {
-      return [];
-    }
-
-    // Ensure Mail app is running
-    await runAppleScript(`
-if application "Mail" is not running then
-    tell application "Mail" to activate
-    delay 2
-end if`);
-
-    const mailboxes: string[] = await run(() => {
-      const Mail = Application("Mail");
-
       try {
-        const mailboxes = Mail.mailboxes();
-
-        if (!mailboxes || mailboxes.length === 0) {
-          try {
-            const result = Mail.execute({
-              withObjectModel: "Mail Suite",
-              withCommand: "get name of every mailbox",
-            });
-
-            if (result && result.length > 0) {
-              return result;
-            }
-          } catch (execError) {}
-
-          return [];
+        const rawResult = await runAppleScript(script);
+        if (rawResult && rawResult.trim().startsWith("[")) {
+          return JSON.parse(rawResult) as EmailMessage[];
         }
-
-        return mailboxes.map((box: unknown) => {
-          try {
-            return (box as { name: () => string }).name();
-          } catch (nameError) {
-            return "Unknown mailbox";
-          }
-        });
-      } catch (error) {
+        console.error(`Failed to parse JSON from AppleScript for ${account}/${mailbox}: ${rawResult}`);
+        return [];
+      } catch (e) {
+        console.error(`Error running/parsing AppleScript for ${account}/${mailbox}:`, e);
         return [];
       }
+    };
+
+    let mailboxesToFetch: { account: string; mailbox: string }[] = [];
+
+    if (targetAccountName && targetMailboxName) {
+      mailboxesToFetch.push({ account: targetAccountName, mailbox: targetMailboxName });
+    } else if (targetAccountName && !targetMailboxName) {
+      mailboxesToFetch.push({ account: targetAccountName, mailbox: "Inbox" });
+    } else { // No specific account, or only mailbox specified
+      const allMailboxesRaw = await listMailboxes(); // Get all "account/mailbox" strings
+      const allAccountsAndMailboxes = allMailboxesRaw.map(mbStr => {
+        const parts = mbStr.split('/');
+        return { account: parts[0], mailbox: parts.slice(1).join('/') }; // Handle mailboxes with '/' in their name
+      });
+
+      if (targetMailboxName) { // Only mailbox specified, search in all accounts
+        allAccountsAndMailboxes.forEach(accMbox => {
+          if (accMbox.mailbox.toLowerCase() === targetMailboxName.toLowerCase()) {
+            mailboxesToFetch.push(accMbox);
+          }
+        });
+      } else { // Neither account nor mailbox specified, default to Inbox in all accounts
+        allAccountsAndMailboxes.forEach(accMbox => {
+          if (accMbox.mailbox.toLowerCase() === "inbox") {
+            mailboxesToFetch.push(accMbox);
+          }
+        });
+      }
+    }
+    
+    // Remove duplicate mailboxes to fetch (e.g. if user specifies "Inbox" and we also default to it)
+    mailboxesToFetch = mailboxesToFetch.filter((mb, index, self) =>
+        index === self.findIndex((t) => (
+            t.account === mb.account && t.mailbox === mb.mailbox
+        ))
+    );
+
+    if (mailboxesToFetch.length === 0) {
+        console.error("No mailboxes identified to fetch emails from.");
+        return [];
+    }
+
+    const emailPromises = mailboxesToFetch.map(mb => getEmailsFromMailbox(mb.account, mb.mailbox));
+    const resultsByMailbox = await Promise.all(emailPromises);
+    let allEmails = resultsByMailbox.flat();
+
+    // Sort by dateReceived (descending)
+    allEmails.sort((a, b) => {
+      const dateA = a.dateReceived ? new Date(a.dateReceived).getTime() : 0;
+      const dateB = b.dateReceived ? new Date(b.dateReceived).getTime() : 0;
+      return dateB - dateA;
     });
 
-    return mailboxes;
+    // Apply TypeScript-side filtering
+    if (searchTerm && searchTerm.trim() !== "") {
+      const fuse = new Fuse(allEmails, {
+        keys: ["subject", "sender"], // User specified subject and sender
+        includeScore: true,
+        threshold: 0.4,
+        isCaseSensitive: false,
+      });
+      allEmails = fuse.search(searchTerm).map((result) => result.item);
+    }
+
+    if (typeof filterIsRead === 'boolean') {
+      allEmails = allEmails.filter(email => email.isRead === filterIsRead);
+    }
+
+    if (typeof filterIsFlagged === 'boolean') {
+      allEmails = allEmails.filter(email => email.isFlagged === filterIsFlagged);
+    }
+
+    return allEmails.slice(0, limit);
   } catch (error) {
-    console.error("Error in getMailboxes:", error);
+    console.error("Error in listEmails:", error);
     throw new Error(
-      `Error getting mailboxes: ${error instanceof Error ? error.message : String(error)}`,
+      `Error listing emails: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
 }
 
-async function getAccounts(): Promise<string[]> {
+async function readEmail(messageId: string): Promise<EmailMessage | null> {
   try {
     if (!(await checkMailAccess())) {
-      return [];
+      return null
     }
-
-    const accounts = await runAppleScript(`
-tell application "Mail"
-    set acctNames to {}
-    repeat with a in accounts
-        set end of acctNames to name of a
-    end repeat
-    return acctNames
-end tell`);
-
-    return accounts ? accounts.split(", ") : [];
-  } catch (error) {
-    console.error("Error getting accounts:", error);
-    throw new Error(
-      `Error getting mail accounts: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-}
-
-async function getMailboxesForAccount(accountName: string): Promise<string[]> {
-  try {
-    if (!(await checkMailAccess())) {
-      return [];
-    }
-
-    const mailboxes = await runAppleScript(`
-tell application "Mail"
-    set boxNames to {}
-    try
-        set targetAccount to first account whose name is "${accountName.replace(/"/g, '\\"')}"
-        set acctMailboxes to every mailbox of targetAccount
-        repeat with mb in acctMailboxes
-            set end of boxNames to name of mb
+    // The AppleScript needs the targetID to be set.
+    // We will pass it as an argument to the script.
+    const script = `
+on readEmailById(targetID)
+    set foundEmail to missing value
+    tell application "Mail"
+        if not (running) then activate
+        delay 1
+        set allAccounts to every account
+        repeat with currentAccount in allAccounts
+            if foundEmail is not missing value then exit repeat
+            if enabled of currentAccount then
+                set allMailboxes to every mailbox of currentAccount
+                repeat with currentMailbox in allMailboxes
+                    if foundEmail is not missing value then exit repeat
+                    try
+                        set msgs to messages of currentMailbox whose id is targetID
+                        if (count of msgs) > 0 then
+                            set msg to item 1 of msgs
+                            set foundEmail to {¬
+                                account:name of currentAccount, ¬
+                                mailbox:name of currentMailbox, ¬
+                                messageId:id of msg, ¬
+                                subject:subject of msg, ¬
+                                sender:sender of msg, ¬
+                                dateReceived:(date received of msg) as string, ¬
+                                isRead:read status of msg, ¬
+                                isFlagged:flagged status of msg, ¬
+                                content:content of msg}
+                            exit repeat
+                        end if
+                    end try
+                end repeat
+            end if
         end repeat
-    on error errMsg
-        return "Error: " & errMsg
-    end try
-    return boxNames
-end tell`);
+    end tell
+    if foundEmail is missing value then
+        return "Error: No email found with ID " & targetID
+    else
+        return foundEmail
+    end if
+end readEmailById
 
-    if (mailboxes?.startsWith("Error:")) {
-      console.error(mailboxes);
+return readEmailById("${messageId}")
+`
+
+    const rawResult = await runAppleScript(script)
+
+    if (rawResult.startsWith("Error:")) {
+      console.error(`Error from AppleScript (readEmail): ${rawResult}`)
+      return null
+    }
+
+    // Similar brittle parsing as listEmails.
+    const recordRegex =
+      /\{account:"([^"]*)", mailbox:"([^"]*)", messageId:"([^"]*)", subject:"([^"]*)", sender:"([^"]*)", dateReceived:"([^"]*)", isRead:(true|false), isFlagged:(true|false), content:"((?:[^"]|\\")*)"\}/
+    const match = recordRegex.exec(rawResult)
+
+    if (match) {
+      return {
+        account: match[1],
+        mailbox: match[2],
+        messageId: match[3],
+        subject: match[4],
+        sender: match[5],
+        dateReceived: match[6],
+        isRead: match[7] === "true",
+        isFlagged: match[8] === "true",
+        content: match[9].replace(/\\"/g, '"').replace(/\\n/g, "\n").replace(/\\r/g, "\r"), // Unescape content
+      }
+    }
+    console.error(`Failed to parse email details from AppleScript result: ${rawResult}`)
+    return null
+  } catch (error) {
+    console.error("Error in readEmail:", error)
+    throw new Error(
+      `Error reading email: ${error instanceof Error ? error.message : String(error)}`,
+    )
+  }
+}
+
+async function moveEmail(
+  messageId: string,
+  targetMailboxName: string,
+  targetAccountName?: string,
+): Promise<{ success: boolean; message: string }> {
+  try {
+    if (!(await checkMailAccess())) {
+      return { success: false, message: "Mail app not accessible." }
+    }
+
+    // Construct the target mailbox part of the script carefully
+    let targetMailboxScript = `set targetMailbox to mailbox "${targetMailboxName.replace(/"/g, '\\"')}"`
+    if (targetAccountName) {
+      targetMailboxScript = `set targetMailbox to mailbox "${targetMailboxName.replace(/"/g, '\\"')}" of account "${targetAccountName.replace(/"/g, '\\"')}"`
+    }
+
+    const script = `
+on moveMessage(msgId, tgtMailboxName, tgtAccountName)
+    tell application "Mail"
+        activate
+        set foundMessage to missing value
+        
+        -- Find the message
+        set allAccounts to every account
+        repeat with currentAccount in allAccounts
+            if foundMessage is not missing value then exit repeat
+            set allMailboxes to every mailbox of currentAccount
+            repeat with mbox in allMailboxes
+                if foundMessage is not missing value then exit repeat
+                try
+                    set msgs to messages of mbox whose id is msgId
+                    if (count of msgs) > 0 then
+                        set foundMessage to item 1 of msgs
+                        exit repeat
+                    end if
+                end try
+            end repeat
+        end repeat
+
+        if foundMessage is missing value then
+            return {success:false, message:"Could not find message with ID: " & msgId}
+        end if
+
+        -- Find the target mailbox
+        try
+            ${targetMailboxScript}
+            if not (exists targetMailbox) then
+                 error "Target mailbox " & tgtMailboxName & " not found."
+            end if
+        on error errMsg
+            return {success:false, message:"Error finding target mailbox: " & errMsg}
+        end try
+        
+        try
+            move foundMessage to targetMailbox
+            return {success:true, message:"Message " & msgId & " moved to " & tgtMailboxName & " successfully."}
+        on error errMsg
+            return {success:false, message:"Error moving message: " & errMsg}
+        end try
+    end tell
+end moveMessage
+
+return moveMessage("${messageId}", "${targetMailboxName.replace(/"/g, '\\"')}", ${targetAccountName ? `"${targetAccountName.replace(/"/g, '\\"')}"` : "missing value"})
+`
+
+    const resultString = await runAppleScript(script)
+    if (resultString.includes("success:true")) {
+      const messageMatch = resultString.match(/message:"([^"]+)"/)
+      const message = messageMatch ? messageMatch[1] : "Message moved successfully."
+      return { success: true, message }
+    } else {
+      const messageMatch = resultString.match(/message:"([^"]+)"/)
+      const message = messageMatch ? messageMatch[1] : "Failed to move message."
+      return { success: false, message }
+    }
+  } catch (error) {
+    console.error("Error in moveEmail:", error)
+    return {
+      success: false,
+      message: `Error moving email: ${error instanceof Error ? error.message : String(error)}`,
+    }
+  }
+}
+
+interface MailboxInfo {
+  account: string;
+  mailbox: string;
+  totalCount?: number;
+  unreadCount?: number;
+}
+
+async function listMailboxes(accountName?: string): Promise<string[]> {
+  try {
+    if (!(await checkMailAccess())) {
       return [];
     }
 
-    return mailboxes ? mailboxes.split(", ") : [];
+    // The new apple-scripts/list-mailboxes.applescript returns JSON directly.
+    // We need to construct the script to call that script's logic.
+    // For simplicity, we'll embed the core logic here, adapted to optionally filter by account
+    // and ensure it returns the "account/mailbox" string format.
+
+    let script = `
+set mailboxList to {}
+tell application "Mail"
+    if not (running) then activate
+    delay 1
+    
+    set accountsToProcess to {}
+    if "${accountName ? accountName.replace(/"/g, '\\"') : ""}" is not "" then
+        try
+            set targetAccount to account "${accountName!.replace(/"/g, '\\"')}"
+            if exists targetAccount then
+                set accountsToProcess to {targetAccount}
+            else
+                return "Error: Account '" & "${accountName!.replace(/"/g, '\\"')}" & "' not found."
+            end if
+        on error
+             return "Error: Account '" & "${accountName!.replace(/"/g, '\\"')}" & "' not found."
+        end try
+    else
+        set accountsToProcess to every account
+    end if
+    
+    repeat with currentAccount in accountsToProcess
+        try
+            if enabled of currentAccount then
+                set accName to name of currentAccount
+                set accountMailboxes to mailboxes of currentAccount
+                repeat with mb in accountMailboxes
+                    set end of mailboxList to (accName & "/" & (name of mb as string))
+                end repeat
+            end if
+        end try
+    end repeat
+    
+    -- If no specific account, also consider "On My Mac" top-level mailboxes if they exist
+    -- However, the user's script for list-mailboxes.applescript handles "On My Mac" separately.
+    -- For consistency with the previous listMailboxes, we'll stick to account-based iteration.
+    -- If "On My Mac" is desired when no accountName is specified, it should be handled by calling
+    -- this function with accountName "On My Mac" or by enhancing the script.
+    -- The provided apple-scripts/list-mailboxes.applescript seems to handle "On My Mac" when no account is specified.
+    -- Let's use the user's provided script logic for list-mailboxes.applescript if no accountName is given.
+    
+    if "${accountName ? "" : "true"}" is "true" then -- Simulating the logic from user's list-mailboxes.applescript for "all"
+        set localMailboxes to mailboxes whose container is not an account -- This gets top-level mailboxes like "On My Mac"
+        repeat with mbox in localMailboxes
+            set mboxName to name of mbox
+            -- Check if it's already added via an account (e.g. iCloud/Inbox vs On My Mac/Inbox)
+            -- For simplicity, we'll just add them. Duplicates can be filtered in TS if necessary.
+            set end of mailboxList to ("On My Mac" & "/" & mboxName)
+        end repeat
+    end if
+    
+end tell
+return mailboxList
+`;
+    // If a specific accountName is provided, the script above handles it.
+    // If no accountName, we want to mimic the behavior of the user's new apple-scripts/list-mailboxes.applescript
+    // which returns JSON. The current listMailboxes in TS is expected to return string[].
+    // Let's adjust to use the JSON output from the user's script if no accountName is given.
+
+    if (!accountName) {
+        // Use the logic from the user's new apple-scripts/list-mailboxes.applescript
+        // This script is expected to return a JSON string representing MailboxInfo[]
+        script = `
+set mailboxData to {}
+tell application "Mail"
+    set allAccounts to every account
+    repeat with acct in allAccounts
+        set acctName to name of acct
+        set acctMailboxes to every mailbox of acct
+        repeat with mbox in acctMailboxes
+            set mboxName to name of mbox
+            set end of mailboxData to (acctName & "/" & mboxName)
+        end repeat
+    end repeat
+    
+    -- Handle "On My Mac" top-level mailboxes (mailboxes not directly under an account)
+    try
+        set localMailboxesContainer to mailboxes whose container is not an account
+        repeat with mbox in localMailboxesContainer
+            set mboxName to name of mbox
+            set end of mailboxData to ("On My Mac" & "/" & mboxName)
+        end repeat
+    on error
+        -- "On My Mac" might not exist or have mailboxes
+    end try
+end tell
+set AppleScript's text item delimiters to ","
+set outputString to mailboxData as string 
+set AppleScript's text item delimiters to "" -- Reset to default
+return outputString
+`;
+    }
+
+
+    const rawResult = await runAppleScript(script);
+
+    if (rawResult.startsWith("Error:")) {
+      console.error(`Error from AppleScript (listMailboxes): ${rawResult}`);
+      throw new Error(rawResult);
+    }
+    
+    if (rawResult.trim() === "") {
+        return [];
+    }
+
+    const mailboxes = rawResult.split(",").map(mb => mb.trim()).filter(mb => mb.length > 0);
+    // Remove duplicates that might arise from "On My Mac" logic
+    return [...new Set(mailboxes)];
+
   } catch (error) {
-    console.error("Error getting mailboxes for account:", error);
+    console.error("Error in listMailboxes:", error);
     throw new Error(
-      `Error getting mailboxes for account ${accountName}: ${error instanceof Error ? error.message : String(error)}`,
+      `Error listing mailboxes: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
 }
 
 export default {
-  getUnreadMails,
-  searchMails,
-  sendMail,
-  getMailboxes,
-  getAccounts,
-  getMailboxesForAccount,
-};
+  createDraftEmail,
+  listEmails,
+  readEmail,
+  moveEmail,
+  listMailboxes,
+  checkMailAccess,
+}

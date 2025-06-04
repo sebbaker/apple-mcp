@@ -2,10 +2,8 @@
 
 ## Prerequisites
 
-- **Bun:** This project uses Bun as its JavaScript runtime. If you don't have it installed, you can install it by following the instructions on the [official Bun website](https://bun.sh/). Typically, this is:
-  ```bash
-  curl -fsSL https://bun.sh/install | bash
-  ```
+- **Bun:** This project uses Bun as its JavaScript runtime. If you don't have it installed, you can install it by following the instructions on the [official Bun website](https://bun.sh/).
+
 - **Git:** To clone the repository.
 
 ## Installation

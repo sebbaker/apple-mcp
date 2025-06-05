@@ -1,5 +1,6 @@
 import Fuse from "fuse.js"
 import { run } from "@jxa/run"
+import { runAppleScript } from "run-applescript"
 
 async function checkMailAccess(): Promise<boolean> {
   try {
@@ -95,7 +96,7 @@ async function createDraftEmail(
             for (const mbox of allMailboxes) {
               if (foundMessage) break
               try {
-                const msgs = mbox.messages.whose({ id: originalMessageIdArg })()
+                const msgs = mbox.messages.whose({ messageId: originalMessageIdArg })()
                 if (msgs.length > 0) {
                   foundMessage = msgs[0]
                   break
@@ -211,6 +212,35 @@ async function listEmails({
       return []
     }
 
+    // Get all available mailboxes for validation
+    const allMailboxesRaw = await listMailboxes()
+
+    // Validate account and mailbox names if provided
+    if (targetAccountName) {
+      const accountExists = allMailboxesRaw.some((mb) => mb.account === targetAccountName)
+      if (!accountExists) {
+        throw new Error(
+          `Account "${targetAccountName}" not found. Available accounts: ${[...new Set(allMailboxesRaw.map((mb) => mb.account))].join(", ")}`,
+        )
+      }
+    }
+
+    if (targetMailboxName) {
+      const mailboxExists = allMailboxesRaw.some((mb) =>
+        targetAccountName
+          ? mb.account === targetAccountName && mb.mailbox === targetMailboxName
+          : mb.mailbox === targetMailboxName,
+      )
+      if (!mailboxExists) {
+        const availableMailboxes = targetAccountName
+          ? allMailboxesRaw.filter((mb) => mb.account === targetAccountName).map((mb) => mb.mailbox)
+          : [...new Set(allMailboxesRaw.map((mb) => mb.mailbox))]
+        throw new Error(
+          `Mailbox "${targetMailboxName}" not found${targetAccountName ? ` in account "${targetAccountName}"` : ""}. Available mailboxes: ${availableMailboxes.join(", ")}`,
+        )
+      }
+    }
+
     const getEmailsFromMailboxJXA = async (
       account: string,
       mailbox: string,
@@ -243,7 +273,7 @@ async function listEmails({
                   account: accountNameArg,
                   mailbox: mailboxNameArg,
                 }
-                emailRecord.messageId = msg.id()
+                emailRecord.messageId = msg.messageId()
                 emailRecord.subject = msg.subject() || "[No Subject]" // subject is a function
                 emailRecord.sender = msg.sender() || "[Unknown Sender]"
                 const dateReceived = msg.dateReceived()
@@ -271,17 +301,20 @@ async function listEmails({
     if (targetAccountName && targetMailboxName) {
       mailboxesToFetch.push({ account: targetAccountName, mailbox: targetMailboxName })
     } else if (targetAccountName && !targetMailboxName) {
-      const allMailboxesRaw = await listMailboxes()
       const matchingInboxName = allMailboxesRaw
         .filter((mb) => mb.account === targetAccountName && mb.mailbox.toLowerCase() === "inbox")
         .pop()?.mailbox
 
       if (!matchingInboxName) {
-        throw new Error(`No inbox found in account '${targetAccountName}'`)
+        throw new Error(
+          `No inbox found in account '${targetAccountName}'. Available mailboxes: ${allMailboxesRaw
+            .filter((mb) => mb.account === targetAccountName)
+            .map((mb) => mb.mailbox)
+            .join(", ")}`,
+        )
       }
       mailboxesToFetch.push({ account: targetAccountName, mailbox: matchingInboxName })
     } else {
-      const allMailboxesRaw = await listMailboxes()
       if (targetMailboxName) {
         allMailboxesRaw.forEach((accMbox) => {
           if (accMbox.mailbox.toLowerCase() === targetMailboxName.toLowerCase()) {
@@ -323,7 +356,7 @@ async function listEmails({
       const fuse = new Fuse(allEmails, {
         keys: ["subject", "sender"],
         includeScore: true,
-        threshold: 0.4,
+        threshold: 0.2,
         isCaseSensitive: false,
       })
       allEmails = fuse.search(searchTerm).map((result) => result.item)
@@ -346,52 +379,96 @@ async function listEmails({
   }
 }
 
-async function readEmail(messageId: string): Promise<EmailMessage | null> {
+interface ReadEmailRequest {
+  messageId: string
+}
+
+interface ReadEmailDetails {
+  messageId: string
+  account?: string
+  mailbox?: string
+  subject: string
+  sender: string
+  dateReceived?: string
+  isRead?: boolean
+  isFlagged?: boolean
+  content?: string
+  success: boolean
+  error?: string
+}
+
+async function readEmails(readRequests: ReadEmailRequest[]): Promise<ReadEmailDetails[]> {
   try {
     if (!(await checkMailAccess())) {
-      return null
+      return readRequests.map((req) => ({
+        messageId: req.messageId,
+        subject: "",
+        sender: "",
+        success: false,
+        error: "Mail app not accessible.",
+      }))
     }
 
-    return run<EmailMessage | null>((msgId: string) => {
-      const Mail = Application("Mail")
-      if (!Mail.running()) Mail.activate()
-      delay(1)
+    // Read messages in parallel
+    const readMessage = async (request: ReadEmailRequest): Promise<ReadEmailDetails> => {
+      return run<ReadEmailDetails>((msgId: string) => {
+        const Mail = Application("Mail")
+        if (!Mail.running()) Mail.activate()
+        delay(1)
 
-      const allAccounts = Mail.accounts()
-      for (const currentAccount of allAccounts) {
-        if (!currentAccount.enabled()) continue
+        const allAccounts = Mail.accounts()
+        for (const currentAccount of allAccounts) {
+          if (!currentAccount.enabled()) continue
 
-        const allMailboxes = currentAccount.mailboxes()
-        for (const currentMailbox of allMailboxes) {
-          try {
-            const msgs = currentMailbox.messages.whose({ id: msgId })()
-            if (msgs.length > 0) {
-              const msg = msgs[0]
-              const dateReceived = msg.dateReceived()
-              return {
-                account: currentAccount.name(),
-                mailbox: currentMailbox.name(),
-                messageId: msg.id(),
-                subject: msg.subject() || "[No Subject]",
-                sender: msg.sender() || "[Unknown Sender]",
-                dateReceived: dateReceived ? dateReceived.toISOString() : undefined,
-                isRead: msg.readStatus(),
-                isFlagged: msg.flaggedStatus(),
-                content: msg.content(),
+          const allMailboxes = currentAccount.mailboxes()
+          for (const currentMailbox of allMailboxes) {
+            try {
+              const msgs = currentMailbox.messages.whose({ messageId: msgId })()
+              if (msgs.length > 0) {
+                const msg = msgs[0]
+                const dateReceived = msg.dateReceived()
+                return {
+                  messageId: msgId,
+                  account: currentAccount.name(),
+                  mailbox: currentMailbox.name(),
+                  subject: msg.subject() || "[No Subject]",
+                  sender: msg.sender() || "[Unknown Sender]",
+                  dateReceived: dateReceived ? dateReceived.toISOString() : undefined,
+                  isRead: msg.readStatus(),
+                  isFlagged: msg.flaggedStatus(),
+                  content: msg.content(),
+                  success: true,
+                }
               }
+            } catch (e) {
+              // ignore and continue
             }
-          } catch (e) {
-            // ignore and continue
           }
         }
-      }
-      return null
-    }, messageId)
+        return {
+          messageId: msgId,
+          subject: "",
+          sender: "",
+          success: false,
+          error: `Could not find or read email with ID: ${msgId}`,
+        }
+      }, request.messageId)
+    }
+
+    // Read all messages in parallel
+    const readPromises = readRequests.map((request) => readMessage(request))
+    const readResults = await Promise.all(readPromises)
+
+    return readResults
   } catch (error) {
-    console.error("Error in readEmail:", error)
-    throw new Error(
-      `Error reading email: ${error instanceof Error ? error.message : String(error)}`,
-    )
+    console.error("Error in readEmails:", error)
+    return readRequests.map((req) => ({
+      messageId: req.messageId,
+      subject: "",
+      sender: "",
+      success: false,
+      error: `Error reading emails: ${error instanceof Error ? error.message : String(error)}`,
+    }))
   }
 }
 
@@ -403,152 +480,73 @@ interface MoveEmailRequest {
 
 interface MovedEmailDetails {
   messageId: string
-  sender: string
-  subject: string
-  dateReceived: string
-  sourceAccount: string
-  sourceMailbox: string
-  targetAccount: string
-  targetMailbox: string
   success: boolean
   error?: string
 }
 
-async function moveEmail(
-  moveRequests: MoveEmailRequest[],
-): Promise<{ success: boolean; message: string; movedEmails: MovedEmailDetails[] }> {
+async function moveEmails(
+  moveRequest: MoveEmailRequest,
+): Promise<{ success: boolean; message: string; movedEmail: MovedEmailDetails }> {
   try {
     if (!(await checkMailAccess())) {
-      return { success: false, message: "Mail app not accessible.", movedEmails: [] }
+      return {
+        success: false,
+        message: "Mail app not accessible.",
+        movedEmail: {
+          messageId: moveRequest.messageId,
+          success: false,
+          error: "Mail app not accessible.",
+        },
+      }
     }
 
-    // Phase 1: Fetch details for all messages in parallel
-    const fetchMessageDetails = async (
-      messageId: string,
-    ): Promise<{
-      messageId: string
-      sender: string
-      subject: string
-      dateReceived: string
-      sourceAccount: string
-      sourceMailbox: string
-      found: boolean
-      error?: string
-    }> => {
-      return run<{
-        messageId: string
-        sender: string
-        subject: string
-        dateReceived: string
-        sourceAccount: string
-        sourceMailbox: string
-        found: boolean
-        error?: string
-      }>((msgId: string) => {
-        const Mail = Application("Mail")
-        Mail.activate()
-        let foundMessageRef: any = null
-        let sourceAccount = ""
-        let sourceMailbox = ""
+    // Get all available mailboxes for validation
+    const allMailboxes = await listMailboxes()
+    const validMailboxes = new Set(allMailboxes.map((mb) => `${mb.account}/${mb.mailbox}`))
 
-        // Find the message across all accounts and mailboxes
-        const allAccounts = Mail.accounts()
-        for (const currentAccount of allAccounts) {
-          if (foundMessageRef) break
-          const allMailboxes = currentAccount.mailboxes()
-          for (const mbox of allMailboxes) {
-            if (foundMessageRef) break
-            try {
-              const msgs = mbox.messages.whose({ id: msgId })()
-              if (msgs.length > 0) {
-                foundMessageRef = msgs[0]
-                sourceAccount = currentAccount.name()
-                sourceMailbox = mbox.name()
-                break
-              }
-            } catch (e) {
-              // ignore and continue searching
-            }
-          }
-        }
+    // Validate target mailbox before attempting move
+    const targetKey = `${moveRequest.targetAccountName}/${moveRequest.targetMailboxName}`
+    if (!validMailboxes.has(targetKey)) {
+      const availableAccounts = [...new Set(allMailboxes.map((mb) => mb.account))]
+      const availableMailboxesForAccount = allMailboxes
+        .filter((mb) => mb.account === moveRequest.targetAccountName)
+        .map((mb) => mb.mailbox)
 
-        if (!foundMessageRef) {
-          return {
-            messageId: msgId,
-            sender: "",
-            subject: "",
-            dateReceived: "",
-            sourceAccount: "",
-            sourceMailbox: "",
-            found: false,
-            error: `Message with ID ${msgId} not found`,
-          }
-        }
+      const errorMessage =
+        availableMailboxesForAccount.length > 0
+          ? `Mailbox "${moveRequest.targetMailboxName}" not found in account "${moveRequest.targetAccountName}". Available mailboxes: ${availableMailboxesForAccount.join(", ")}`
+          : `Account "${moveRequest.targetAccountName}" not found. Available accounts: ${availableAccounts.join(", ")}`
 
-        // Collect message details
-        let sender = ""
-        let subject = ""
-        let dateReceived = ""
-        try {
-          sender = foundMessageRef.sender() || "[Unknown Sender]"
-          subject = foundMessageRef.subject() || "[No Subject]"
-          const msgDate = foundMessageRef.dateReceived()
-          dateReceived = msgDate ? msgDate.toISOString() : ""
-        } catch (e) {
-          // Use defaults if we can't get details
-        }
-
-        return {
-          messageId: msgId,
-          sender,
-          subject,
-          dateReceived,
-          sourceAccount,
-          sourceMailbox,
-          found: true,
-        }
-      }, messageId)
+      return {
+        success: false,
+        message: errorMessage,
+        movedEmail: {
+          messageId: moveRequest.messageId,
+          success: false,
+          error: errorMessage,
+        },
+      }
     }
 
-    // Fetch all message details in parallel
-    const fetchPromises = moveRequests.map((request) => fetchMessageDetails(request.messageId))
-    const fetchedDetails = await Promise.all(fetchPromises)
-
-    // Create a map for quick lookup of details by messageId
-    const detailsMap = new Map<string, (typeof fetchedDetails)[0]>()
-    fetchedDetails.forEach((detail) => {
-      detailsMap.set(detail.messageId, detail)
-    })
-
-    // Phase 2: Move all messages in parallel
-    const moveMessage = async (
-      request: MoveEmailRequest,
-    ): Promise<{
-      messageId: string
-      success: boolean
-      error?: string
-    }> => {
-      return run<{
-        messageId: string
-        success: boolean
-        error?: string
-      }>(
-        (msgId: string, tgtMailboxName: string, tgtAccountName: string) => {
+    try {
+      const wasSuccessful = await run<boolean>(
+        (messageIdToMove: string, targetMailboxName: string, targetAccountName: string) => {
           const Mail = Application("Mail")
-          Mail.activate()
-          let foundMessageRef: any = null
 
-          // Find the message again (we need the reference for moving)
+          let foundMessage: any = null
+          let wasSuccess = false
+
+          // Find the message across all accounts and mailboxes
           const allAccounts = Mail.accounts()
           for (const currentAccount of allAccounts) {
-            if (foundMessageRef) break
+            if (foundMessage) break
             const allMailboxes = currentAccount.mailboxes()
             for (const mbox of allMailboxes) {
-              if (foundMessageRef) break
+              if (foundMessage) break
               try {
-                const msgs = mbox.messages.whose({ id: msgId })()
+                const msgs = mbox.messages.whose({ messageId: messageIdToMove })()
                 if (msgs.length > 0) {
-                  foundMessageRef = msgs[0]
+                  foundMessage = msgs[0]
                   break
                 }
               } catch (e) {
@@ -557,128 +555,450 @@ async function moveEmail(
             }
           }
 
-          if (!foundMessageRef) {
-            return {
-              messageId: msgId,
-              success: false,
-              error: `Message with ID ${msgId} not found during move`,
+          if (foundMessage) {
+            try {
+              // Get target mailbox reference
+              const targetAccount = Mail.accounts.byName(targetAccountName)
+              const targetMailboxRef = targetAccount.mailboxes.byName(targetMailboxName)
+
+              // Move the message to the target mailbox
+              Mail.move(foundMessage, { to: targetMailboxRef })
+              wasSuccess = true
+            } catch (e) {
+              // Move operation failed
             }
           }
 
-          // Verify target mailbox exists
-          let targetMailboxRef: any = null
-          try {
-            const acc = Mail.accounts.byName(tgtAccountName)
-            if (!acc.exists()) {
-              return {
-                messageId: msgId,
-                success: false,
-                error: `Target account "${tgtAccountName}" not found`,
-              }
-            }
-            targetMailboxRef = acc.mailboxes.byName(tgtMailboxName)
-            if (!targetMailboxRef.exists()) {
-              return {
-                messageId: msgId,
-                success: false,
-                error: `Target mailbox "${tgtMailboxName}" not found in account "${tgtAccountName}"`,
-              }
-            }
-          } catch (e: any) {
-            return {
-              messageId: msgId,
-              success: false,
-              error: `Error finding target mailbox: ${e.message || String(e)}`,
-            }
-          }
-
-          try {
-            // Add a small delay to let Mail.app settle before the move operation
-            delay(0.3)
-
-            // Move the message to the target mailbox
-            Mail.move(foundMessageRef, { to: targetMailboxRef })
-
-            // Add a small delay to let Mail.app settle after the move operation
-            delay(0.3)
-
-            return {
-              messageId: msgId,
-              success: true,
-            }
-          } catch (e: any) {
-            return {
-              messageId: msgId,
-              success: false,
-              error: `Error moving message: ${e.message || String(e)}`,
-            }
-          }
+          return wasSuccess
         },
-        request.messageId,
-        request.targetMailboxName,
-        request.targetAccountName,
+        moveRequest.messageId,
+        moveRequest.targetMailboxName,
+        moveRequest.targetAccountName,
       )
-    }
 
-    // Move all messages in parallel
-    const movePromises = moveRequests.map((request) => moveMessage(request))
-    const moveResults = await Promise.all(movePromises)
-
-    // Combine fetched details with move results
-    const movedEmails: MovedEmailDetails[] = moveRequests.map((request, index) => {
-      const details = detailsMap.get(request.messageId)
-      const moveResult = moveResults[index]
-
-      if (!details || !details.found) {
-        return {
-          messageId: request.messageId,
-          sender: "",
-          subject: "",
-          dateReceived: "",
-          sourceAccount: "",
-          sourceMailbox: "",
-          targetAccount: request.targetAccountName,
-          targetMailbox: request.targetMailboxName,
-          success: false,
-          error: details?.error || `Message with ID ${request.messageId} not found`,
-        }
+      const movedEmail: MovedEmailDetails = {
+        messageId: moveRequest.messageId,
+        success: wasSuccessful,
+        error: wasSuccessful ? undefined : "Move operation failed",
       }
 
       return {
-        messageId: request.messageId,
-        sender: details.sender,
-        subject: details.subject,
-        dateReceived: details.dateReceived,
-        sourceAccount: details.sourceAccount,
-        sourceMailbox: details.sourceMailbox,
-        targetAccount: request.targetAccountName,
-        targetMailbox: request.targetMailboxName,
-        success: moveResult.success,
-        error: moveResult.error,
+        success: wasSuccessful,
+        message: wasSuccessful ? "Successfully moved message." : "Failed to move message.",
+        movedEmail,
       }
-    })
+    } catch (error) {
+      const movedEmail: MovedEmailDetails = {
+        messageId: moveRequest.messageId,
+        success: false,
+        error: `JXA execution failed: ${error instanceof Error ? error.message : String(error)}`,
+      }
 
-    // Calculate success metrics
-    const successCount = movedEmails.filter((email) => email.success).length
-    const totalMessages = moveRequests.length
-    const failedCount = totalMessages - successCount
-
-    let message = `Successfully moved ${successCount} of ${totalMessages} message(s).`
-    if (failedCount > 0) {
-      message += ` ${failedCount} message(s) failed to move.`
-    }
-
-    return {
-      success: successCount > 0,
-      message,
-      movedEmails,
+      return {
+        success: false,
+        message: `Error moving email: ${error instanceof Error ? error.message : String(error)}`,
+        movedEmail,
+      }
     }
   } catch (error) {
-    console.error("Error in moveEmail:", error)
+    console.error("Error in moveEmails:", error)
+    const movedEmail: MovedEmailDetails = {
+      messageId: moveRequest.messageId,
+      success: false,
+      error: `Error moving email: ${error instanceof Error ? error.message : String(error)}`,
+    }
+
     return {
       success: false,
-      message: `Error moving emails: ${error instanceof Error ? error.message : String(error)}`,
-      movedEmails: [],
+      message: `Error moving email: ${error instanceof Error ? error.message : String(error)}`,
+      movedEmail,
+    }
+  }
+}
+
+interface CopyEmailRequest {
+  messageId: string
+  targetMailboxName: string
+  targetAccountName: string
+}
+
+interface CopiedEmailDetails {
+  messageId: string
+  success: boolean
+  error?: string
+}
+
+async function copyEmails(
+  copyRequest: CopyEmailRequest,
+): Promise<{ success: boolean; message: string; copiedEmail: CopiedEmailDetails }> {
+  try {
+    if (!(await checkMailAccess())) {
+      return {
+        success: false,
+        message: "Mail app not accessible.",
+        copiedEmail: {
+          messageId: copyRequest.messageId,
+          success: false,
+          error: "Mail app not accessible.",
+        },
+      }
+    }
+
+    // Get all available mailboxes for validation
+    const allMailboxes = await listMailboxes()
+    const validMailboxes = new Set(allMailboxes.map((mb) => `${mb.account}/${mb.mailbox}`))
+
+    // Validate target mailbox before attempting copy
+    const targetKey = `${copyRequest.targetAccountName}/${copyRequest.targetMailboxName}`
+    if (!validMailboxes.has(targetKey)) {
+      const availableAccounts = [...new Set(allMailboxes.map((mb) => mb.account))]
+      const availableMailboxesForAccount = allMailboxes
+        .filter((mb) => mb.account === copyRequest.targetAccountName)
+        .map((mb) => mb.mailbox)
+
+      const errorMessage =
+        availableMailboxesForAccount.length > 0
+          ? `Mailbox "${copyRequest.targetMailboxName}" not found in account "${copyRequest.targetAccountName}". Available mailboxes: ${availableMailboxesForAccount.join(", ")}`
+          : `Account "${copyRequest.targetAccountName}" not found. Available accounts: ${availableAccounts.join(", ")}`
+
+      return {
+        success: false,
+        message: errorMessage,
+        copiedEmail: {
+          messageId: copyRequest.messageId,
+          success: false,
+          error: errorMessage,
+        },
+      }
+    }
+
+    try {
+      const wasSuccessful = await run<boolean>(
+        (messageIdToCopy: string, targetMailboxName: string, targetAccountName: string) => {
+          const Mail = Application("Mail")
+
+          let foundMessage: any = null
+          let wasSuccess = false
+
+          // Find the message across all accounts and mailboxes
+          const allAccounts = Mail.accounts()
+          for (const currentAccount of allAccounts) {
+            if (foundMessage) break
+            const allMailboxes = currentAccount.mailboxes()
+            for (const mbox of allMailboxes) {
+              if (foundMessage) break
+              try {
+                const msgs = mbox.messages.whose({ messageId: messageIdToCopy })()
+                if (msgs.length > 0) {
+                  foundMessage = msgs[0]
+                  break
+                }
+              } catch (e) {
+                // ignore and continue searching
+              }
+            }
+          }
+
+          if (foundMessage) {
+            try {
+              // Get target mailbox reference
+              const targetAccount = Mail.accounts.byName(targetAccountName)
+              const targetMailboxRef = targetAccount.mailboxes.byName(targetMailboxName)
+
+              // Copy the message to the target mailbox
+              Mail.duplicate(foundMessage, { to: targetMailboxRef })
+              wasSuccess = true
+            } catch (e) {
+              // Copy operation failed
+            }
+          }
+
+          return wasSuccess
+        },
+        copyRequest.messageId,
+        copyRequest.targetMailboxName,
+        copyRequest.targetAccountName,
+      )
+
+      const copiedEmail: CopiedEmailDetails = {
+        messageId: copyRequest.messageId,
+        success: wasSuccessful,
+        error: wasSuccessful ? undefined : "Copy operation failed",
+      }
+
+      return {
+        success: wasSuccessful,
+        message: wasSuccessful ? "Successfully copied message." : "Failed to copy message.",
+        copiedEmail,
+      }
+    } catch (error) {
+      const copiedEmail: CopiedEmailDetails = {
+        messageId: copyRequest.messageId,
+        success: false,
+        error: `JXA execution failed: ${error instanceof Error ? error.message : String(error)}`,
+      }
+
+      return {
+        success: false,
+        message: `Error copying email: ${error instanceof Error ? error.message : String(error)}`,
+        copiedEmail,
+      }
+    }
+  } catch (error) {
+    console.error("Error in copyEmails:", error)
+    const copiedEmail: CopiedEmailDetails = {
+      messageId: copyRequest.messageId,
+      success: false,
+      error: `Error copying email: ${error instanceof Error ? error.message : String(error)}`,
+    }
+
+    return {
+      success: false,
+      message: `Error copying email: ${error instanceof Error ? error.message : String(error)}`,
+      copiedEmail,
+    }
+  }
+}
+
+interface ArchiveEmailRequest {
+  messageId: string
+}
+
+interface ArchivedEmailDetails {
+  messageId: string
+  success: boolean
+  error?: string
+}
+
+async function archiveEmails(
+  archiveRequest: ArchiveEmailRequest,
+): Promise<{ success: boolean; message: string; archivedEmail: ArchivedEmailDetails }> {
+  try {
+    if (!(await checkMailAccess())) {
+      return {
+        success: false,
+        message: "Mail app not accessible.",
+        archivedEmail: {
+          messageId: archiveRequest.messageId,
+          success: false,
+          error: "Mail app not accessible.",
+        },
+      }
+    }
+
+    try {
+      const wasSuccessful = await run<boolean>((messageIdToArchive: string) => {
+        const Mail = Application("Mail")
+        // Mail.activate()
+
+        let foundMessage: any = null
+        let wasSuccess = false
+
+        // Find the message across all accounts and mailboxes
+        const allAccounts = Mail.accounts()
+        for (const account of allAccounts) {
+          if (!account.enabled()) continue
+          const mailboxes = account.mailboxes()
+          for (const mailbox of mailboxes) {
+            try {
+              const messages = mailbox.messages.whose({ messageId: messageIdToArchive })()
+              if (messages.length > 0) {
+                foundMessage = messages[0]
+                break
+              }
+            } catch (e) {
+              // ignore, continue search
+            }
+          }
+          if (foundMessage) break
+        }
+
+        if (foundMessage) {
+          try {
+            // Attempt 1: Try standard archive function first
+            Mail.archive(foundMessage)
+            wasSuccess = true
+          } catch (e1) {
+            try {
+              // Attempt 2: Two-step archive (move to Trash, then to Archive)
+              const sourceAccount = foundMessage.mailbox().account()
+              const trashMailbox = sourceAccount.mailboxes.byName("Trash")
+
+              // Move to trash first
+              Mail.move(foundMessage, { to: trashMailbox })
+
+              // Find the message in trash and move to archive
+              let messageInTrash: any = null
+              try {
+                const messagesInTrash = trashMailbox.messages.whose({
+                  messageId: messageIdToArchive,
+                })()
+                if (messagesInTrash.length > 0) {
+                  messageInTrash = messagesInTrash[0]
+                }
+              } catch (eFindInTrash) {
+                // ignore
+              }
+
+              if (messageInTrash) {
+                const archiveMailbox = sourceAccount.mailboxes.byName("Archive")
+                Mail.move(messageInTrash, { to: archiveMailbox })
+                wasSuccess = true
+              }
+            } catch (e2) {
+              // Two-step archive also failed
+            }
+          }
+        }
+
+        return wasSuccess
+      }, archiveRequest.messageId)
+
+      const archivedEmail: ArchivedEmailDetails = {
+        messageId: archiveRequest.messageId,
+        success: wasSuccessful,
+        error: wasSuccessful ? undefined : "Archiving failed",
+      }
+
+      return {
+        success: wasSuccessful,
+        message: wasSuccessful ? "Successfully archived message." : "Failed to archive message.",
+        archivedEmail,
+      }
+    } catch (error) {
+      const archivedEmail: ArchivedEmailDetails = {
+        messageId: archiveRequest.messageId,
+        success: false,
+        error: `JXA execution failed: ${error instanceof Error ? error.message : String(error)}`,
+      }
+
+      return {
+        success: false,
+        message: `Error archiving email: ${error instanceof Error ? error.message : String(error)}`,
+        archivedEmail,
+      }
+    }
+  } catch (error) {
+    console.error("Error in archiveEmails:", error)
+    const archivedEmail: ArchivedEmailDetails = {
+      messageId: archiveRequest.messageId,
+      success: false,
+      error: `Error archiving email: ${error instanceof Error ? error.message : String(error)}`,
+    }
+
+    return {
+      success: false,
+      message: `Error archiving email: ${error instanceof Error ? error.message : String(error)}`,
+      archivedEmail,
+    }
+  }
+}
+
+interface TrashEmailRequest {
+  messageId: string
+}
+
+interface TrashedEmailDetails {
+  messageId: string
+  success: boolean
+  error?: string
+}
+
+async function trashEmails(
+  trashRequest: TrashEmailRequest,
+): Promise<{ success: boolean; message: string; trashedEmail: TrashedEmailDetails }> {
+  try {
+    if (!(await checkMailAccess())) {
+      return {
+        success: false,
+        message: "Mail app not accessible.",
+        trashedEmail: {
+          messageId: trashRequest.messageId,
+          success: false,
+          error: "Mail app not accessible.",
+        },
+      }
+    }
+
+    try {
+      const wasSuccessful = await run<boolean>((messageIdToTrash: string) => {
+        const Mail = Application("Mail")
+
+        let foundMessage: any = null
+        let wasSuccess = false
+
+        // Find the message across all accounts and mailboxes
+        const allAccounts = Mail.accounts()
+        for (const currentAccount of allAccounts) {
+          if (foundMessage) break
+          const allMailboxes = currentAccount.mailboxes()
+          for (const mbox of allMailboxes) {
+            if (foundMessage) break
+            try {
+              const msgs = mbox.messages.whose({ messageId: messageIdToTrash })()
+              if (msgs.length > 0) {
+                foundMessage = msgs[0]
+                break
+              }
+            } catch (e) {
+              // ignore and continue searching
+            }
+          }
+        }
+
+        if (foundMessage) {
+          try {
+            // Get the account of the found message
+            const sourceAccount = foundMessage.mailbox().account()
+            const trashMailbox = sourceAccount.mailboxes.byName("Trash")
+
+            // Move the message to the trash mailbox
+            Mail.move(foundMessage, { to: trashMailbox })
+            wasSuccess = true
+          } catch (e) {
+            // Trash operation failed
+          }
+        }
+
+        return wasSuccess
+      }, trashRequest.messageId)
+
+      const trashedEmail: TrashedEmailDetails = {
+        messageId: trashRequest.messageId,
+        success: wasSuccessful,
+        error: wasSuccessful ? undefined : "Trash operation failed",
+      }
+
+      return {
+        success: wasSuccessful,
+        message: wasSuccessful ? "Successfully moved message to trash." : "Failed to move message to trash.",
+        trashedEmail,
+      }
+    } catch (error) {
+      const trashedEmail: TrashedEmailDetails = {
+        messageId: trashRequest.messageId,
+        success: false,
+        error: `JXA execution failed: ${error instanceof Error ? error.message : String(error)}`,
+      }
+
+      return {
+        success: false,
+        message: `Error moving email to trash: ${error instanceof Error ? error.message : String(error)}`,
+        trashedEmail,
+      }
+    }
+  } catch (error) {
+    console.error("Error in trashEmails:", error)
+    const trashedEmail: TrashedEmailDetails = {
+      messageId: trashRequest.messageId,
+      success: false,
+      error: `Error moving email to trash: ${error instanceof Error ? error.message : String(error)}`,
+    }
+
+    return {
+      success: false,
+      message: `Error moving email to trash: ${error instanceof Error ? error.message : String(error)}`,
+      trashedEmail,
     }
   }
 }
@@ -693,6 +1013,7 @@ async function listMailboxes(): Promise<MailboxEntry[]> {
       const Mail = Application("Mail")
       const mailboxes: MailboxEntry[] = []
 
+      // Get mailboxes from all accounts
       const allAccounts = Mail.accounts()
       for (const acct of allAccounts) {
         const acctName = acct.name()
@@ -701,6 +1022,18 @@ async function listMailboxes(): Promise<MailboxEntry[]> {
           mailboxes.push({ account: acctName, mailbox: mbox.name() })
         }
       }
+
+      // Get "On My Mac" mailboxes
+      try {
+        const localMailboxes = Mail.localMailboxes()
+        for (const mbox of localMailboxes) {
+          mailboxes.push({ account: "On My Mac", mailbox: mbox.name() })
+        }
+      } catch (e) {
+        // If localMailboxes() doesn't exist or fails, silently continue
+        // Some versions of Mail might not have this property
+      }
+
       return mailboxes
     })
   } catch (error) {
@@ -714,8 +1047,11 @@ async function listMailboxes(): Promise<MailboxEntry[]> {
 export default {
   createDraftEmail,
   listEmails,
-  readEmail,
-  moveEmail,
+  readEmails,
+  moveEmails,
+  copyEmails,
+  archiveEmails,
+  trashEmails,
   listMailboxes,
   checkMailAccess,
 }

@@ -126,149 +126,264 @@ function initServer() {
       }
 
       switch (name) {
-        case "mail": {
-          if (!isMailArgs(args)) {
-            throw new Error("Invalid arguments for mail tool")
+        case "createDraft": {
+          if (!isCreateDraftArgs(args)) {
+            throw new Error("Invalid arguments for createDraft tool")
           }
 
           try {
             const mailModule = await loadModule("mail")
-
-            switch (args.operation) {
-              case "createDraft": {
-                if (typeof args.isReply !== "boolean" || !args.subject || !args.body) {
-                  throw new Error(
-                    "isReply, subject, and body are required for createDraft operation.",
-                  )
-                }
-                if (args.isReply && !args.originalMessageId) {
-                  throw new Error("originalMessageId is required when isReply is true.")
-                }
-                // No specific check for toAddress as it can be optional for a draft
-                const result = await mailModule.createDraftEmail(
-                  args.isReply,
-                  args.originalMessageId || null,
-                  args.toAddress || null,
-                  args.subject,
-                  args.body,
-                  args.attachmentPath || null,
-                )
-                return {
-                  content: [{ type: "text", text: result.message }],
-                  isError: !result.success,
-                  ...(result.draftId && { draftId: result.draftId }),
-                }
-              }
-              case "list": {
-                const emails = await mailModule.listEmails({
-                  searchTerm: args.searchTerm,
-                  limit: args.limit,
-                  accountName: args.accountName,
-                  mailboxName: args.mailboxName,
-                  isRead: args.isRead,
-                  isFlagged: args.isFlagged,
-                })
-                return {
-                  content: [
-                    {
-                      type: "text",
-                      text:
-                        emails.length > 0
-                          ? `Found ${emails.length} email(s)${args.searchTerm ? ` matching "${args.searchTerm}"` : ""}:\n\n` +
-                            emails
-                              .map(
-                                (email) =>
-                                  `ID: ${email.messageId}\nFrom: ${email.sender}\nSubject: ${email.subject}\nDate: ${email.dateReceived}\nMailbox: ${email.account} - ${email.mailbox}\nRead: ${email.isRead}\nFlagged: ${email.isFlagged}`,
-                              )
-                              .join("\n\n---\n\n")
-                          : `No emails found${args.searchTerm ? ` for "${args.searchTerm}"` : ""}`,
-                    },
-                  ],
-                  isError: false,
-                }
-              }
-              case "read": {
-                if (!args.messageId) {
-                  throw new Error("messageId is required for read operation.")
-                }
-                const email = await mailModule.readEmail(args.messageId)
-                if (email) {
-                  return {
-                    content: [
-                      {
-                        type: "text",
-                        text: `Email Details (ID: ${email.messageId}):\nFrom: ${email.sender}\nSubject: ${email.subject}\nDate: ${email.dateReceived}\nMailbox: ${email.account} - ${email.mailbox}\nRead: ${email.isRead}\nFlagged: ${email.isFlagged}\n\nContent:\n${email.content}`,
-                      },
-                    ],
-                    isError: false,
-                  }
-                } else {
-                  return {
-                    content: [
-                      {
-                        type: "text",
-                        text: `Could not find or read email with ID: ${args.messageId}`,
-                      },
-                    ],
-                    isError: true,
-                  }
-                }
-              }
-              case "move": {
-                if (!args.moveRequests || !Array.isArray(args.moveRequests) || args.moveRequests.length === 0) {
-                  throw new Error(
-                    "moveRequests array is required for move operation and must contain at least one request.",
-                  )
-                }
-                const result = await mailModule.moveEmail(args.moveRequests)
-                
-                // Format the detailed response
-                let responseText = result.message + "\n\n"
-                if (result.movedEmails.length > 0) {
-                  responseText += "Details:\n"
-                  result.movedEmails.forEach((email, index) => {
-                    responseText += `${index + 1}. ${email.success ? "✓" : "✗"} ${email.subject}\n`
-                    responseText += `   From: ${email.sender}\n`
-                    responseText += `   Date: ${email.dateReceived}\n`
-                    responseText += `   Moved from: ${email.sourceAccount} - ${email.sourceMailbox}\n`
-                    responseText += `   Moved to: ${email.targetAccount} - ${email.targetMailbox}\n`
-                    if (!email.success && email.error) {
-                      responseText += `   Error: ${email.error}\n`
-                    }
-                    responseText += "\n"
-                  })
-                }
-                
-                return {
-                  content: [{ type: "text", text: responseText }],
-                  isError: !result.success,
-                }
-              }
-              case "listMailboxes": {
-                const mailboxes = await mailModule.listMailboxes()
-                return {
-                  content: [
-                    {
-                      type: "text",
-                      text:
-                        mailboxes.length > 0
-                          ? `Found ${mailboxes.length} mailbox(es):\n\n${mailboxes.map(mb => `${mb.account}/${mb.mailbox}`).join("\n")}`
-                          : `No mailboxes found.`,
-                    },
-                  ],
-                  isError: false,
-                }
-              }
-              default:
-                // @ts-expect-error - args.operation might be an invalid string here
-                throw new Error(`Unknown mail operation: ${args.operation}`)
+            if (args.isReply && !args.originalMessageId) {
+              throw new Error("originalMessageId is required when isReply is true.")
+            }
+            const result = await mailModule.createDraftEmail(
+              args.isReply,
+              args.originalMessageId || null,
+              args.toAddress || null,
+              args.subject,
+              args.body,
+              args.attachmentPath || null,
+            )
+            return {
+              content: [{ type: "text", text: result.message }],
+              isError: !result.success,
+              ...(result.draftId && { draftId: result.draftId }),
             }
           } catch (error) {
             return {
               content: [
                 {
                   type: "text",
-                  text: `Error with mail operation: ${error instanceof Error ? error.message : String(error)}`,
+                  text: `Error with createDraft operation: ${error instanceof Error ? error.message : String(error)}`,
+                },
+              ],
+              isError: true,
+            }
+          }
+        }
+
+        case "listEmails": {
+          if (!isListEmailsArgs(args)) {
+            throw new Error("Invalid arguments for listEmails tool")
+          }
+
+          try {
+            const mailModule = await loadModule("mail")
+            const emails = await mailModule.listEmails({
+              searchTerm: args.searchTerm,
+              limit: args.limit,
+              accountName: args.accountName,
+              mailboxName: args.mailboxName,
+              isRead: args.isRead,
+              isFlagged: args.isFlagged,
+            })
+            return {
+              content: [
+                {
+                  type: "text",
+                  text:
+                    emails.length > 0
+                      ? `Found ${emails.length} email(s)${args.searchTerm ? ` matching "${args.searchTerm}"` : ""}:\n\n` +
+                        emails
+                          .map(
+                            (email) =>
+                              `ID: ${email.messageId}\nFrom: ${email.sender}\nSubject: ${email.subject}\nDate: ${email.dateReceived}\nMailbox: ${email.account} - ${email.mailbox}\nRead: ${email.isRead}\nFlagged: ${email.isFlagged}`,
+                          )
+                          .join("\n\n---\n\n")
+                      : `No emails found${args.searchTerm ? ` for "${args.searchTerm}"` : ""}`,
+                },
+              ],
+              isError: false,
+            }
+          } catch (error) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `Error with listEmails operation: ${error instanceof Error ? error.message : String(error)}`,
+                },
+              ],
+              isError: true,
+            }
+          }
+        }
+
+        case "readEmails": {
+          if (!isReadEmailsArgs(args)) {
+            throw new Error("Invalid arguments for readEmails tool")
+          }
+
+          try {
+            const mailModule = await loadModule("mail")
+            const results = await mailModule.readEmails(args.readRequests)
+
+            let responseText = `Read ${results.length} email(s):\n\n`
+            results.forEach((email, index) => {
+              responseText += `${index + 1}. ${email.success ? "✓" : "✗"} ${email.subject}\n`
+              if (email.success) {
+                responseText += `   From: ${email.sender}\n`
+                responseText += `   Date: ${email.dateReceived}\n`
+                responseText += `   Mailbox: ${email.account} - ${email.mailbox}\n`
+                responseText += `   Read: ${email.isRead}\n`
+                responseText += `   Flagged: ${email.isFlagged}\n`
+                responseText += `   Content:\n${email.content}\n`
+              } else {
+                responseText += `   Error: ${email.error}\n`
+              }
+              responseText += "\n"
+            })
+
+            return {
+              content: [{ type: "text", text: responseText }],
+              isError: results.some((r) => !r.success),
+            }
+          } catch (error) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `Error with readEmails operation: ${error instanceof Error ? error.message : String(error)}`,
+                },
+              ],
+              isError: true,
+            }
+          }
+        }
+
+        case "listMailboxes": {
+          try {
+            const mailModule = await loadModule("mail")
+            const mailboxes = await mailModule.listMailboxes()
+            return {
+              content: [
+                {
+                  type: "text",
+                  text:
+                    mailboxes.length > 0
+                      ? `Found ${mailboxes.length} mailbox(es):\n\n${mailboxes.map((mb) => `${mb.account}/${mb.mailbox}`).join("\n")}`
+                      : `No mailboxes found.`,
+                },
+              ],
+              isError: false,
+            }
+          } catch (error) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `Error with listMailboxes operation: ${error instanceof Error ? error.message : String(error)}`,
+                },
+              ],
+              isError: true,
+            }
+          }
+        }
+
+        case "archive": {
+          if (!isArchiveArgs(args)) {
+            throw new Error("Invalid arguments for archive tool")
+          }
+
+          try {
+            const mailModule = await loadModule("mail")
+            const result = await mailModule.archiveEmails({ messageId: args.messageId })
+
+            return {
+              content: [{ type: "text", text: result.message }],
+              isError: !result.success,
+            }
+          } catch (error) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `Error with archive operation: ${error instanceof Error ? error.message : String(error)}`,
+                },
+              ],
+              isError: true,
+            }
+          }
+        }
+
+        case "copy": {
+          if (!isCopyArgs(args)) {
+            throw new Error("Invalid arguments for copy tool")
+          }
+
+          try {
+            const mailModule = await loadModule("mail")
+            const result = await mailModule.copyEmails({
+              messageId: args.messageId,
+              targetMailboxName: args.targetMailboxName,
+              targetAccountName: args.targetAccountName,
+            })
+
+            return {
+              content: [{ type: "text", text: result.message }],
+              isError: !result.success,
+            }
+          } catch (error) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `Error with copy operation: ${error instanceof Error ? error.message : String(error)}`,
+                },
+              ],
+              isError: true,
+            }
+          }
+        }
+
+        case "move": {
+          if (!isMoveArgs(args)) {
+            throw new Error("Invalid arguments for move tool")
+          }
+
+          try {
+            const mailModule = await loadModule("mail")
+            const result = await mailModule.moveEmails({
+              messageId: args.messageId,
+              targetMailboxName: args.targetMailboxName,
+              targetAccountName: args.targetAccountName,
+            })
+
+            return {
+              content: [{ type: "text", text: result.message }],
+              isError: !result.success,
+            }
+          } catch (error) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `Error with move operation: ${error instanceof Error ? error.message : String(error)}`,
+                },
+              ],
+              isError: true,
+            }
+          }
+        }
+
+        case "trash": {
+          if (!isTrashArgs(args)) {
+            throw new Error("Invalid arguments for trash tool")
+          }
+
+          try {
+            const mailModule = await loadModule("mail")
+            const result = await mailModule.trashEmails({ messageId: args.messageId })
+
+            return {
+              content: [{ type: "text", text: result.message }],
+              isError: !result.success,
+            }
+          } catch (error) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `Error with trash operation: ${error instanceof Error ? error.message : String(error)}`,
                 },
               ],
               isError: true,
@@ -346,161 +461,149 @@ interface MoveEmailRequest {
   targetAccountName: string
 }
 
-type MailArgs =
-  | {
-      operation: "createDraft"
-      isReply: boolean
-      originalMessageId?: string
-      toAddress?: string
-      subject: string
-      body: string
-      attachmentPath?: string
-      searchTerm?: never
-      limit?: never
-      moveRequests?: never
-      targetMailboxName?: never
-      targetAccountName?: never
-      accountName?: never
-      mailboxName?: never
-      isRead?: never
-      isFlagged?: never
-    }
-  | {
-      operation: "list"
-      searchTerm?: string
-      limit?: number
-      accountName?: string
-      mailboxName?: string
-      isRead?: boolean
-      isFlagged?: boolean
-      isReply?: never
-      originalMessageId?: never
-      toAddress?: never
-      subject?: never
-      body?: never
-      attachmentPath?: never
-      moveRequests?: never
-      targetMailboxName?: never
-      targetAccountName?: never
-    }
-  | {
-      operation: "read"
-      messageId: string
-      searchTerm?: never
-      limit?: never
-      isReply?: never
-      originalMessageId?: never
-      toAddress?: never
-      subject?: never
-      body?: never
-      attachmentPath?: never
-      targetMailboxName?: never
-      targetAccountName?: never
-      accountName?: never
-      mailboxName?: never
-      isRead?: never
-      isFlagged?: never
-      moveRequests?: never
-    }
-  | {
-      operation: "move"
-      moveRequests: MoveEmailRequest[]
-      searchTerm?: never
-      limit?: never
-      isReply?: never
-      originalMessageId?: never
-      toAddress?: never
-      subject?: never
-      body?: never
-      attachmentPath?: never
-      accountName?: never
-      mailboxName?: never
-      isRead?: never
-      isFlagged?: never
-      targetMailboxName?: never
-      targetAccountName?: never
-    }
-  | {
-      operation: "listMailboxes"
-      searchTerm?: never
-      limit?: never
-      isReply?: never
-      originalMessageId?: never
-      toAddress?: never
-      subject?: never
-      body?: never
-      attachmentPath?: never
-      moveRequests?: never
-      targetMailboxName?: never
-      targetAccountName?: never
-      mailboxName?: never
-      isRead?: never
-      isFlagged?: never
-      accountName?: never
-    }
+interface TrashEmailRequest {
+  messageId: string
+}
 
-function isMailArgs(args: unknown): args is MailArgs {
+interface ArchiveEmailRequest {
+  messageId: string
+}
+
+// Removed isCalendarArgs function
+
+type ArchiveArgs = {
+  messageId: string
+}
+
+function isArchiveArgs(args: unknown): args is ArchiveArgs {
   if (typeof args !== "object" || args === null) {
     return false
   }
 
-  const { operation } = args as { operation?: string }
+  const { messageId } = args as { messageId?: unknown }
 
-  if (!operation || !["createDraft", "list", "read", "move", "listMailboxes"].includes(operation)) {
+  return typeof messageId === "string"
+}
+
+type CopyArgs = {
+  messageId: string
+  targetMailboxName: string
+  targetAccountName: string
+}
+
+function isCopyArgs(args: unknown): args is CopyArgs {
+  if (typeof args !== "object" || args === null) {
     return false
   }
 
-  switch (operation) {
-    case "createDraft":
-      const { isReply, subject, body } = args as MailArgs & { operation: "createDraft" }
-      if (typeof isReply !== "boolean" || typeof subject !== "string" || typeof body !== "string")
-        return false
-      if (
-        isReply &&
-        typeof (args as MailArgs & { operation: "createDraft" }).originalMessageId !== "string"
-      )
-        return false
-      break
-    case "list":
-      const { searchTerm, limit, accountName, mailboxName, isRead, isFlagged } =
-        args as MailArgs & { operation: "list" }
-      if (searchTerm && typeof searchTerm !== "string") return false
-      if (limit && typeof limit !== "number") return false
-      if (accountName && typeof accountName !== "string") return false
-      if (mailboxName && typeof mailboxName !== "string") return false
-      if (isRead !== undefined && typeof isRead !== "boolean") return false
-      if (isFlagged !== undefined && typeof isFlagged !== "boolean") return false
-      break
-    case "read":
-      const { messageId } = args as MailArgs & { operation: "read" }
-      if (typeof messageId !== "string") return false
-      break
-    case "move":
-      const { moveRequests } = args as MailArgs & { operation: "move" }
-      if (!Array.isArray(moveRequests) || moveRequests.length === 0) return false
-      if (!moveRequests.every(req => 
-        typeof req === "object" && 
-        typeof req.messageId === "string" && 
-        typeof req.targetMailboxName === "string" && 
-        typeof req.targetAccountName === "string"
-      )) return false
-      break
-    case "listMailboxes":
-      // No arguments to validate for listMailboxes anymore, as accountName is removed.
-      // const { accountName: listMbAccountNameFromArgs } = args as MailArgs & { operation: "listMailboxes" };
-      // if (listMbAccountNameFromArgs && typeof listMbAccountNameFromArgs !== "string") return false;
-      break
-    default:
-      // This case should ideally not be reached if the operation is one of the valid enum values
-      // and all valid operations are handled above.
-      // If it's a valid operation string but not handled above, it's a logic error in this function.
-      // If it's an invalid operation string, the initial check `!["createDraft", "list", "read", "move", "listMailboxes"].includes(operation)`
-      // should have caught it.
-      // For safety, returning false, but this indicates a potential issue if a valid op reaches here.
-      return false
+  const { messageId, targetMailboxName, targetAccountName } = args as CopyArgs
+
+  return (
+    typeof messageId === "string" &&
+    typeof targetMailboxName === "string" &&
+    typeof targetAccountName === "string"
+  )
+}
+
+interface ReadEmailRequest {
+  messageId: string
+}
+
+type CreateDraftArgs = {
+  isReply: boolean
+  originalMessageId?: string
+  toAddress?: string
+  subject: string
+  body: string
+  attachmentPath?: string
+}
+
+function isCreateDraftArgs(args: unknown): args is CreateDraftArgs {
+  if (typeof args !== "object" || args === null) {
+    return false
   }
+
+  const { isReply, subject, body } = args as CreateDraftArgs
+  if (typeof isReply !== "boolean" || typeof subject !== "string" || typeof body !== "string")
+    return false
+
+  const { originalMessageId } = args as CreateDraftArgs
+  if (isReply && typeof originalMessageId !== "string") return false
 
   return true
 }
 
-// Removed isCalendarArgs function
+type ListEmailsArgs = {
+  searchTerm?: string
+  limit?: number
+  accountName?: string
+  mailboxName?: string
+  isRead?: boolean
+  isFlagged?: boolean
+}
+
+function isListEmailsArgs(args: unknown): args is ListEmailsArgs {
+  if (typeof args !== "object" || args === null) {
+    return false
+  }
+
+  const { searchTerm, limit, accountName, mailboxName, isRead, isFlagged } = args as ListEmailsArgs
+  if (searchTerm && typeof searchTerm !== "string") return false
+  if (limit && typeof limit !== "number") return false
+  if (accountName && typeof accountName !== "string") return false
+  if (mailboxName && typeof mailboxName !== "string") return false
+  if (isRead !== undefined && typeof isRead !== "boolean") return false
+  if (isFlagged !== undefined && typeof isFlagged !== "boolean") return false
+
+  return true
+}
+
+type ReadEmailsArgs = {
+  readRequests: ReadEmailRequest[]
+}
+
+function isReadEmailsArgs(args: unknown): args is ReadEmailsArgs {
+  if (typeof args !== "object" || args === null) {
+    return false
+  }
+
+  const { readRequests } = args as { readRequests?: unknown }
+
+  if (!Array.isArray(readRequests) || readRequests.length === 0) return false
+
+  return readRequests.every((req) => typeof req === "object" && typeof req.messageId === "string")
+}
+
+type MoveArgs = {
+  messageId: string
+  targetMailboxName: string
+  targetAccountName: string
+}
+
+function isMoveArgs(args: unknown): args is MoveArgs {
+  if (typeof args !== "object" || args === null) {
+    return false
+  }
+
+  const { messageId, targetMailboxName, targetAccountName } = args as MoveArgs
+
+  return (
+    typeof messageId === "string" &&
+    typeof targetMailboxName === "string" &&
+    typeof targetAccountName === "string"
+  )
+}
+
+type TrashArgs = {
+  messageId: string
+}
+
+function isTrashArgs(args: unknown): args is TrashArgs {
+  if (typeof args !== "object" || args === null) {
+    return false
+  }
+
+  const { messageId } = args as { messageId?: unknown }
+
+  return typeof messageId === "string"
+}

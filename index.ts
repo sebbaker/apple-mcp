@@ -215,18 +215,32 @@ function initServer() {
                 }
               }
               case "move": {
-                if (!args.messageId || !args.targetMailboxName) {
+                if (!args.moveRequests || !Array.isArray(args.moveRequests) || args.moveRequests.length === 0) {
                   throw new Error(
-                    "messageId and targetMailboxName are required for move operation.",
+                    "moveRequests array is required for move operation and must contain at least one request.",
                   )
                 }
-                const result = await mailModule.moveEmail(
-                  args.messageId,
-                  args.targetMailboxName,
-                  args.targetAccountName,
-                )
+                const result = await mailModule.moveEmail(args.moveRequests)
+                
+                // Format the detailed response
+                let responseText = result.message + "\n\n"
+                if (result.movedEmails.length > 0) {
+                  responseText += "Details:\n"
+                  result.movedEmails.forEach((email, index) => {
+                    responseText += `${index + 1}. ${email.success ? "✓" : "✗"} ${email.subject}\n`
+                    responseText += `   From: ${email.sender}\n`
+                    responseText += `   Date: ${email.dateReceived}\n`
+                    responseText += `   Moved from: ${email.sourceAccount} - ${email.sourceMailbox}\n`
+                    responseText += `   Moved to: ${email.targetAccount} - ${email.targetMailbox}\n`
+                    if (!email.success && email.error) {
+                      responseText += `   Error: ${email.error}\n`
+                    }
+                    responseText += "\n"
+                  })
+                }
+                
                 return {
-                  content: [{ type: "text", text: result.message }],
+                  content: [{ type: "text", text: responseText }],
                   isError: !result.success,
                 }
               }
@@ -238,7 +252,7 @@ function initServer() {
                       type: "text",
                       text:
                         mailboxes.length > 0
-                          ? `Found ${mailboxes.length} mailbox(es):\n\n${mailboxes.join("\n")}`
+                          ? `Found ${mailboxes.length} mailbox(es):\n\n${mailboxes.map(mb => `${mb.account}/${mb.mailbox}`).join("\n")}`
                           : `No mailboxes found.`,
                     },
                   ],
@@ -326,6 +340,12 @@ interface EmailMessage {
   content?: string
 }
 
+interface MoveEmailRequest {
+  messageId: string
+  targetMailboxName: string
+  targetAccountName: string
+}
+
 type MailArgs =
   | {
       operation: "createDraft"
@@ -337,7 +357,7 @@ type MailArgs =
       attachmentPath?: string
       searchTerm?: never
       limit?: never
-      messageId?: never
+      moveRequests?: never
       targetMailboxName?: never
       targetAccountName?: never
       accountName?: never
@@ -359,7 +379,7 @@ type MailArgs =
       subject?: never
       body?: never
       attachmentPath?: never
-      messageId?: never
+      moveRequests?: never
       targetMailboxName?: never
       targetAccountName?: never
     }
@@ -380,12 +400,11 @@ type MailArgs =
       mailboxName?: never
       isRead?: never
       isFlagged?: never
+      moveRequests?: never
     }
   | {
       operation: "move"
-      messageId: string
-      targetMailboxName: string
-      targetAccountName?: string
+      moveRequests: MoveEmailRequest[]
       searchTerm?: never
       limit?: never
       isReply?: never
@@ -398,6 +417,8 @@ type MailArgs =
       mailboxName?: never
       isRead?: never
       isFlagged?: never
+      targetMailboxName?: never
+      targetAccountName?: never
     }
   | {
       operation: "listMailboxes"
@@ -409,7 +430,7 @@ type MailArgs =
       subject?: never
       body?: never
       attachmentPath?: never
-      messageId?: never
+      moveRequests?: never
       targetMailboxName?: never
       targetAccountName?: never
       mailboxName?: never
@@ -455,12 +476,14 @@ function isMailArgs(args: unknown): args is MailArgs {
       if (typeof messageId !== "string") return false
       break
     case "move":
-      const { messageId: moveMessageId, targetMailboxName } = args as MailArgs & {
-        operation: "move"
-      }
-      if (typeof moveMessageId !== "string" || typeof targetMailboxName !== "string") return false
-      const { targetAccountName } = args as MailArgs & { operation: "move" }
-      if (targetAccountName && typeof targetAccountName !== "string") return false
+      const { moveRequests } = args as MailArgs & { operation: "move" }
+      if (!Array.isArray(moveRequests) || moveRequests.length === 0) return false
+      if (!moveRequests.every(req => 
+        typeof req === "object" && 
+        typeof req.messageId === "string" && 
+        typeof req.targetMailboxName === "string" && 
+        typeof req.targetAccountName === "string"
+      )) return false
       break
     case "listMailboxes":
       // No arguments to validate for listMailboxes anymore, as accountName is removed.

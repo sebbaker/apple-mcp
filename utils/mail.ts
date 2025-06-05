@@ -113,7 +113,50 @@ async function createDraftEmail(
             }
           }
           theDraft = Mail.reply(foundMessage, { openingWindow: true })
-          theDraft.content = bodyTextArg + "\r\n\r\n" + theDraft.content()
+          delay(0.7) // Initial delay to allow Mail to set up the reply
+
+          let existingContent = ""
+          const maxRetries = 3
+          const retryDelay = 0.5 // 500ms between retries
+
+          for (let i = 0; i < maxRetries; i++) {
+            try {
+              existingContent = theDraft.content() || ""
+              if (existingContent.trim() !== "") {
+                // Ensure content is not just whitespace
+                break // Successfully got non-empty content
+              }
+            } catch (e: any) {
+              console.log(
+                `Attempt ${i + 1} to read draft content failed: ${e.message || String(e)}`,
+              )
+              if (i === maxRetries - 1) {
+                console.log("Failed to read draft content after all retries.")
+              }
+            }
+            if (i < maxRetries - 1) {
+              // Don't delay after the last attempt
+              delay(retryDelay)
+            }
+          }
+
+          // Log warning if content is still empty after all retries
+          if (existingContent.trim() === "") {
+            console.warn(
+              "Warning: Replying with empty original message content. Mail.reply() may not have populated content yet.",
+            )
+          }
+
+          // Convert bodyTextArg to HTML format for proper prepending
+          // Basic HTML escaping to prevent bodyTextArg from being interpreted as HTML tags
+          const escapedBodyTextArg = bodyTextArg
+            .replace(/&/g, "&")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, ">")
+          const htmlBodyTextArg = escapedBodyTextArg.replace(/\n/g, "<br>")
+
+          // Use HTML line breaks for separation to ensure proper prepending in Mail's rich text content
+          theDraft.content = htmlBodyTextArg + "<br><br>" + existingContent
         } else {
           theDraft = Mail.OutgoingMessage().make()
           theDraft.visible = true
@@ -129,7 +172,10 @@ async function createDraftEmail(
             const attachmentFile = Path(attachmentPathArg) // JXA Path object
             theDraft.attachments.push(Mail.Attachment({ fileName: attachmentFile }))
           } catch (errMsg: any) {
-            return { success: false, message: `Attachment error: ${errMsg.message || String(errMsg)}` }
+            return {
+              success: false,
+              message: `Attachment error: ${errMsg.message || String(errMsg)}`,
+            }
           }
         }
         delay(0.5) // Give Mail a moment to save
@@ -154,7 +200,7 @@ async function createDraftEmail(
 
 async function listEmails({
   searchTerm,
-  limit = 100,
+  limit,
   accountName: targetAccountName,
   mailboxName: targetMailboxName,
   isRead: filterIsRead,
@@ -291,7 +337,7 @@ async function listEmails({
       allEmails = allEmails.filter((email) => email.isFlagged === filterIsFlagged)
     }
 
-    return allEmails.slice(0, limit)
+    return limit ? allEmails.slice(0, limit) : allEmails
   } catch (error) {
     console.error("Error in listEmails:", error)
     throw new Error(
@@ -349,22 +395,63 @@ async function readEmail(messageId: string): Promise<EmailMessage | null> {
   }
 }
 
+interface MoveEmailRequest {
+  messageId: string
+  targetMailboxName: string
+  targetAccountName: string
+}
+
+interface MovedEmailDetails {
+  messageId: string
+  sender: string
+  subject: string
+  dateReceived: string
+  sourceAccount: string
+  sourceMailbox: string
+  targetAccount: string
+  targetMailbox: string
+  success: boolean
+  error?: string
+}
+
 async function moveEmail(
-  messageId: string,
-  targetMailboxName: string,
-  targetAccountName?: string,
-): Promise<{ success: boolean; message: string }> {
+  moveRequests: MoveEmailRequest[],
+): Promise<{ success: boolean; message: string; movedEmails: MovedEmailDetails[] }> {
   try {
     if (!(await checkMailAccess())) {
-      return { success: false, message: "Mail app not accessible." }
+      return { success: false, message: "Mail app not accessible.", movedEmails: [] }
     }
 
-    return run<{ success: boolean; message: string }>(
-      (msgId: string, tgtMailboxName: string, tgtAccountName?: string) => {
+    // Phase 1: Fetch details for all messages in parallel
+    const fetchMessageDetails = async (
+      messageId: string,
+    ): Promise<{
+      messageId: string
+      sender: string
+      subject: string
+      dateReceived: string
+      sourceAccount: string
+      sourceMailbox: string
+      found: boolean
+      error?: string
+    }> => {
+      return run<{
+        messageId: string
+        sender: string
+        subject: string
+        dateReceived: string
+        sourceAccount: string
+        sourceMailbox: string
+        found: boolean
+        error?: string
+      }>((msgId: string) => {
         const Mail = Application("Mail")
         Mail.activate()
         let foundMessageRef: any = null
+        let sourceAccount = ""
+        let sourceMailbox = ""
 
+        // Find the message across all accounts and mailboxes
         const allAccounts = Mail.accounts()
         for (const currentAccount of allAccounts) {
           if (foundMessageRef) break
@@ -375,66 +462,223 @@ async function moveEmail(
               const msgs = mbox.messages.whose({ id: msgId })()
               if (msgs.length > 0) {
                 foundMessageRef = msgs[0]
+                sourceAccount = currentAccount.name()
+                sourceMailbox = mbox.name()
                 break
               }
             } catch (e) {
-              /* ignore */
+              // ignore and continue searching
             }
           }
         }
 
         if (!foundMessageRef) {
-          return { success: false, message: `Could not find message with ID: ${msgId}` }
+          return {
+            messageId: msgId,
+            sender: "",
+            subject: "",
+            dateReceived: "",
+            sourceAccount: "",
+            sourceMailbox: "",
+            found: false,
+            error: `Message with ID ${msgId} not found`,
+          }
         }
 
-        let targetMailboxRef: any = null
+        // Collect message details
+        let sender = ""
+        let subject = ""
+        let dateReceived = ""
         try {
-          if (tgtAccountName) {
-            const acc = Mail.accounts.byName(tgtAccountName)
-            if (acc.exists()) {
-              targetMailboxRef = acc.mailboxes.byName(tgtMailboxName)
-            }
-          } else {
-            targetMailboxRef = Mail.mailboxes.byName(tgtMailboxName)
-            if (!targetMailboxRef.exists()) {
-              for (const account of Mail.accounts()) {
-                const mb = account.mailboxes.byName(tgtMailboxName)
-                if (mb.exists()) {
-                  targetMailboxRef = mb
+          sender = foundMessageRef.sender() || "[Unknown Sender]"
+          subject = foundMessageRef.subject() || "[No Subject]"
+          const msgDate = foundMessageRef.dateReceived()
+          dateReceived = msgDate ? msgDate.toISOString() : ""
+        } catch (e) {
+          // Use defaults if we can't get details
+        }
+
+        return {
+          messageId: msgId,
+          sender,
+          subject,
+          dateReceived,
+          sourceAccount,
+          sourceMailbox,
+          found: true,
+        }
+      }, messageId)
+    }
+
+    // Fetch all message details in parallel
+    const fetchPromises = moveRequests.map((request) => fetchMessageDetails(request.messageId))
+    const fetchedDetails = await Promise.all(fetchPromises)
+
+    // Create a map for quick lookup of details by messageId
+    const detailsMap = new Map<string, (typeof fetchedDetails)[0]>()
+    fetchedDetails.forEach((detail) => {
+      detailsMap.set(detail.messageId, detail)
+    })
+
+    // Phase 2: Move all messages in parallel
+    const moveMessage = async (
+      request: MoveEmailRequest,
+    ): Promise<{
+      messageId: string
+      success: boolean
+      error?: string
+    }> => {
+      return run<{
+        messageId: string
+        success: boolean
+        error?: string
+      }>(
+        (msgId: string, tgtMailboxName: string, tgtAccountName: string) => {
+          const Mail = Application("Mail")
+          Mail.activate()
+          let foundMessageRef: any = null
+
+          // Find the message again (we need the reference for moving)
+          const allAccounts = Mail.accounts()
+          for (const currentAccount of allAccounts) {
+            if (foundMessageRef) break
+            const allMailboxes = currentAccount.mailboxes()
+            for (const mbox of allMailboxes) {
+              if (foundMessageRef) break
+              try {
+                const msgs = mbox.messages.whose({ id: msgId })()
+                if (msgs.length > 0) {
+                  foundMessageRef = msgs[0]
                   break
                 }
+              } catch (e) {
+                // ignore and continue searching
               }
             }
           }
-          if (!targetMailboxRef || !targetMailboxRef.exists()) {
+
+          if (!foundMessageRef) {
             return {
+              messageId: msgId,
               success: false,
-              message: `Target mailbox "${tgtMailboxName}" ${tgtAccountName ? `in account "${tgtAccountName}"` : ""} not found.`,
+              error: `Message with ID ${msgId} not found during move`,
             }
           }
-        } catch (e: any) {
-          return { success: false, message: `Error finding target mailbox: ${e.message || String(e)}` }
-        }
 
-        try {
-          Mail.move(foundMessageRef, { to: targetMailboxRef })
-          return {
-            success: true,
-            message: `Message ${msgId} moved to ${tgtMailboxName} successfully.`,
+          // Verify target mailbox exists
+          let targetMailboxRef: any = null
+          try {
+            const acc = Mail.accounts.byName(tgtAccountName)
+            if (!acc.exists()) {
+              return {
+                messageId: msgId,
+                success: false,
+                error: `Target account "${tgtAccountName}" not found`,
+              }
+            }
+            targetMailboxRef = acc.mailboxes.byName(tgtMailboxName)
+            if (!targetMailboxRef.exists()) {
+              return {
+                messageId: msgId,
+                success: false,
+                error: `Target mailbox "${tgtMailboxName}" not found in account "${tgtAccountName}"`,
+              }
+            }
+          } catch (e: any) {
+            return {
+              messageId: msgId,
+              success: false,
+              error: `Error finding target mailbox: ${e.message || String(e)}`,
+            }
           }
-        } catch (e: any) {
-          return { success: false, message: `Error moving message: ${e.message || String(e)}` }
+
+          try {
+            // Add a small delay to let Mail.app settle before the move operation
+            delay(0.3)
+
+            // Move the message to the target mailbox
+            Mail.move(foundMessageRef, { to: targetMailboxRef })
+
+            // Add a small delay to let Mail.app settle after the move operation
+            delay(0.3)
+
+            return {
+              messageId: msgId,
+              success: true,
+            }
+          } catch (e: any) {
+            return {
+              messageId: msgId,
+              success: false,
+              error: `Error moving message: ${e.message || String(e)}`,
+            }
+          }
+        },
+        request.messageId,
+        request.targetMailboxName,
+        request.targetAccountName,
+      )
+    }
+
+    // Move all messages in parallel
+    const movePromises = moveRequests.map((request) => moveMessage(request))
+    const moveResults = await Promise.all(movePromises)
+
+    // Combine fetched details with move results
+    const movedEmails: MovedEmailDetails[] = moveRequests.map((request, index) => {
+      const details = detailsMap.get(request.messageId)
+      const moveResult = moveResults[index]
+
+      if (!details || !details.found) {
+        return {
+          messageId: request.messageId,
+          sender: "",
+          subject: "",
+          dateReceived: "",
+          sourceAccount: "",
+          sourceMailbox: "",
+          targetAccount: request.targetAccountName,
+          targetMailbox: request.targetMailboxName,
+          success: false,
+          error: details?.error || `Message with ID ${request.messageId} not found`,
         }
-      },
-      messageId,
-      targetMailboxName,
-      targetAccountName,
-    )
+      }
+
+      return {
+        messageId: request.messageId,
+        sender: details.sender,
+        subject: details.subject,
+        dateReceived: details.dateReceived,
+        sourceAccount: details.sourceAccount,
+        sourceMailbox: details.sourceMailbox,
+        targetAccount: request.targetAccountName,
+        targetMailbox: request.targetMailboxName,
+        success: moveResult.success,
+        error: moveResult.error,
+      }
+    })
+
+    // Calculate success metrics
+    const successCount = movedEmails.filter((email) => email.success).length
+    const totalMessages = moveRequests.length
+    const failedCount = totalMessages - successCount
+
+    let message = `Successfully moved ${successCount} of ${totalMessages} message(s).`
+    if (failedCount > 0) {
+      message += ` ${failedCount} message(s) failed to move.`
+    }
+
+    return {
+      success: successCount > 0,
+      message,
+      movedEmails,
+    }
   } catch (error) {
     console.error("Error in moveEmail:", error)
     return {
       success: false,
-      message: `Error moving email: ${error instanceof Error ? error.message : String(error)}`,
+      message: `Error moving emails: ${error instanceof Error ? error.message : String(error)}`,
+      movedEmails: [],
     }
   }
 }

@@ -74,17 +74,35 @@ const MAIL_TOOL: Tool = {
       // For read & move
       messageId: {
         type: "string",
-        description: "The ID of the email to read or move (required for read and move operations).",
+        description: "The ID of the email to read (required for read operation).",
+      },
+      moveRequests: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            messageId: { type: "string" },
+            targetMailboxName: { type: "string" },
+            targetAccountName: { type: "string" }
+          },
+          required: ["messageId", "targetMailboxName", "targetAccountName"]
+        },
+        description: "Array of move requests, each specifying a messageId and its individual target mailbox and account (required for move operation).",
+      },
+      // Legacy properties - keeping for backward compatibility but removing from description
+      messageIds: {
+        type: "array",
+        items: { type: "string" },
+        description: "Deprecated: Use moveRequests instead.",
       },
       // For move
       targetMailboxName: {
         type: "string",
-        description: "The name of the mailbox to move the email to (required for move operation).",
+        description: "Deprecated: Use moveRequests instead.",
       },
       targetAccountName: {
         type: "string",
-        description:
-          "The name of the account for the target mailbox (optional for move operation, recommended if mailbox name is not unique).",
+        description: "Deprecated: Use moveRequests instead.",
       },
     },
     required: ["operation"],

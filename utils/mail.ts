@@ -1,6 +1,5 @@
-import Fuse from "fuse.js"
 import { run } from "@jxa/run"
-import { runAppleScript } from "run-applescript"
+import Fuse from "fuse.js"
 
 async function checkMailAccess(): Promise<boolean> {
   try {
@@ -391,6 +390,13 @@ async function listEmails({
 
 interface ReadEmailRequest {
   messageId: string
+  account?: string // Added for optimization
+  mailbox?: string // Added for optimization
+}
+
+interface LinkDetail {
+  href: string
+  body: string
 }
 
 interface ReadEmailDetails {
@@ -403,6 +409,8 @@ interface ReadEmailDetails {
   isRead?: boolean
   isFlagged?: boolean
   content?: string
+  source?: string
+  links?: LinkDetail[]
   success: boolean
   error?: string
 }
@@ -419,61 +427,141 @@ async function readEmails(readRequests: ReadEmailRequest[]): Promise<ReadEmailDe
       }))
     }
 
-    // Deduplicate read requests by messageId
     const seenMessageIds = new Set<string>()
     const uniqueReadRequests = readRequests.filter((req) => {
-      if (seenMessageIds.has(req.messageId)) {
+      const key =
+        req.account && req.mailbox
+          ? `${req.messageId}_${req.account}_${req.mailbox}`
+          : req.messageId
+      if (seenMessageIds.has(key)) {
+        // Deduplicate based on messageId, account, and mailbox if available
         return false
       }
-      seenMessageIds.add(req.messageId)
+      seenMessageIds.add(key)
       return true
     })
 
-    // Read messages in parallel
     const readMessage = async (request: ReadEmailRequest): Promise<ReadEmailDetails> => {
-      return run<ReadEmailDetails>((msgId: string) => {
-        const Mail = Application("Mail")
+      return run<ReadEmailDetails>(
+        (msgId: string, accountName?: string, mailboxName?: string) => {
+          const Mail = Application("Mail")
 
-        const allAccounts = Mail.accounts()
-        for (const currentAccount of allAccounts) {
-          if (!currentAccount.enabled()) continue
+          const extractLinksFromSource = (htmlSource: string): LinkDetail[] => {
+            const links: LinkDetail[] = []
+            // Regex to capture <a> tags, their href, and their inner HTML content
+            const regex = /<a\s+(?:[^>]*?\s+)?href=(["'])(.*?)\1[^>]*>([\s\S]*?)<\/a>/gi
+            let match
+            while ((match = regex.exec(htmlSource)) !== null) {
+              const href = match[2]
+              let body = match[3]
 
-          const allMailboxes = currentAccount.mailboxes()
-          for (const currentMailbox of allMailboxes) {
+              // Check if the body primarily contains an <img> tag
+              // A simple check: if body trimmed starts with <img and ends with >
+              const trimmedBody = body.trim()
+              if (trimmedBody.toLowerCase().startsWith("<img") && trimmedBody.endsWith(">")) {
+                // This is likely an image link, skip it
+                continue
+              }
+              
+              // Strip HTML tags from the body to get plain text
+              // This is a basic way to strip tags; for complex HTML, a proper parser would be better
+              // but for link text, it's often simple enough.
+              const plainTextBody = body.replace(/<\/?[^>]+(S[^>]*)?>/gi, "").trim();
+
+              // Shorten body content to max 100 characters
+              let shortenedBody = plainTextBody
+              if (plainTextBody.length > 100) {
+                shortenedBody = plainTextBody.substring(0, 97) + "..."
+              }
+
+              links.push({ href: href, body: shortenedBody })
+            }
+            return links
+          }
+
+          let messageToProcess: any = null // JXA Mail message object
+          let sourceAccountName: string | undefined = accountName
+          let sourceMailboxName: string | undefined = mailboxName
+
+          if (accountName && mailboxName) {
             try {
-              const msgs = currentMailbox.messages.whose({ messageId: msgId })()
-              if (msgs.length > 0) {
-                const msg = msgs[0]
-                const dateReceived = msg.dateReceived()
-                return {
-                  messageId: msgId,
-                  account: currentAccount.name(),
-                  mailbox: currentMailbox.name(),
-                  subject: msg.subject() || "[No Subject]",
-                  sender: msg.sender() || "[Unknown Sender]",
-                  dateReceived: dateReceived ? dateReceived.toISOString() : undefined,
-                  isRead: msg.readStatus(),
-                  isFlagged: msg.flaggedStatus(),
-                  content: msg.content(),
-                  success: true,
+              const acc = Mail.accounts.byName(accountName)
+              if (acc.exists() && acc.enabled()) {
+                const mbx = acc.mailboxes.byName(mailboxName)
+                if (mbx.exists()) {
+                  const msgs = mbx.messages.whose({ messageId: msgId })()
+                  if (msgs.length > 0) {
+                    messageToProcess = msgs[0]
+                  }
                 }
               }
             } catch (e) {
-              // ignore and continue
+              // Failed to find in specific account/mailbox, will fallback to search
+              messageToProcess = null
             }
           }
-        }
-        return {
-          messageId: msgId,
-          subject: "",
-          sender: "",
-          success: false,
-          error: `Could not find or read email with ID: ${msgId}`,
-        }
-      }, request.messageId)
+
+          if (!messageToProcess) {
+            // Fallback to searching all mailboxes if not found or account/mailbox not provided
+            sourceAccountName = undefined // Reset these as we are searching
+            sourceMailboxName = undefined
+            const allAccounts = Mail.accounts()
+            for (const currentAccount of allAccounts) {
+              if (messageToProcess) break
+              if (!currentAccount.enabled()) continue
+
+              const allMailboxes = currentAccount.mailboxes()
+              for (const currentMailbox of allMailboxes) {
+                try {
+                  const msgs = currentMailbox.messages.whose({ messageId: msgId })()
+                  if (msgs.length > 0) {
+                    messageToProcess = msgs[0]
+                    sourceAccountName = currentAccount.name()
+                    sourceMailboxName = currentMailbox.name()
+                    break
+                  }
+                } catch (e) {
+                  /* ignore */
+                }
+              }
+            }
+          }
+
+          if (messageToProcess) {
+            const msg = messageToProcess
+            const dateReceived = msg.dateReceived()
+            const emailSource = msg.source()
+            const extractedLinks = emailSource ? extractLinksFromSource(emailSource) : []
+            return {
+              messageId: msgId,
+              account: sourceAccountName,
+              mailbox: sourceMailboxName,
+              subject: msg.subject() || "[No Subject]",
+              sender: msg.sender() || "[Unknown Sender]",
+              dateReceived: dateReceived ? dateReceived.toISOString() : undefined,
+              isRead: msg.readStatus(),
+              isFlagged: msg.flaggedStatus(),
+              content: msg.content(),
+              source: emailSource,
+              links: extractedLinks,
+              success: true,
+            }
+          }
+
+          return {
+            messageId: msgId,
+            subject: "",
+            sender: "",
+            success: false,
+            error: `Could not find or read email with ID: ${msgId}${accountName && mailboxName ? ` in ${accountName}/${mailboxName}` : ""}`,
+          }
+        },
+        request.messageId,
+        request.account,
+        request.mailbox,
+      )
     }
 
-    // Read all unique messages in parallel
     const readPromises = uniqueReadRequests.map((request) => readMessage(request))
     const readResults = await Promise.all(readPromises)
 
@@ -568,7 +656,7 @@ async function moveEmails(
                   break
                 }
               } catch (e) {
-                // ignore and continue searching
+                // ignore and continue
               }
             }
           }

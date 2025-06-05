@@ -73,7 +73,7 @@ const LIST_EMAILS_TOOL: Tool = {
 
 const READ_EMAILS_TOOL: Tool = {
   name: "readEmails",
-  description: "Read the full content of specific emails by their IDs.",
+  description: "Read the full content, source, and extracted links of specific emails by their IDs. Optionally, provide account and mailbox for faster lookup.",
   inputSchema: {
     type: "object",
     properties: {
@@ -82,11 +82,13 @@ const READ_EMAILS_TOOL: Tool = {
         items: {
           type: "object",
           properties: {
-            messageId: { type: "string" },
+            messageId: { type: "string", description: "The ID of the message to read." },
+            account: { type: "string", description: "Optional: The account name where the email is located for faster lookup." },
+            mailbox: { type: "string", description: "Optional: The mailbox name where the email is located for faster lookup." },
           },
           required: ["messageId"],
         },
-        description: "Array of read requests, each specifying a messageId to read.",
+        description: "Array of read requests, each specifying a messageId and optionally account and mailbox.",
       },
     },
     required: ["readRequests"],

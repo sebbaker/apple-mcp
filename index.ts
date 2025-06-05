@@ -215,18 +215,34 @@ function initServer() {
 
           try {
             const mailModule = await loadModule("mail")
-            const results = await mailModule.readEmails(args.readRequests)
+            // Ensure ReadEmailRequest in index.ts matches the one in mail.ts for the call
+            const results = await mailModule.readEmails(args.readRequests.map(req => ({
+              messageId: req.messageId,
+              account: (req as any).account, // Cast to any if account/mailbox not in schema yet
+              mailbox: (req as any).mailbox, // Cast to any if account/mailbox not in schema yet
+            })))
 
             let responseText = `Read ${results.length} email(s):\n\n`
             results.forEach((email, index) => {
               responseText += `${index + 1}. ${email.success ? "✓" : "✗"} ${email.subject}\n`
               if (email.success) {
+                responseText += `   Message ID: ${email.messageId}\n`
                 responseText += `   From: ${email.sender}\n`
                 responseText += `   Date: ${email.dateReceived}\n`
-                responseText += `   Mailbox: ${email.account} - ${email.mailbox}\n`
+                if (email.account && email.mailbox) {
+                  responseText += `   Mailbox: ${email.account} - ${email.mailbox}\n`
+                }
                 responseText += `   Read: ${email.isRead}\n`
                 responseText += `   Flagged: ${email.isFlagged}\n`
                 responseText += `   Content:\n${email.content}\n`
+                if (email.links && email.links.length > 0) {
+                  responseText += `   Links:\n`
+                  email.links.forEach(link => {
+                    responseText += `     - Text: ${link.body}, URL: ${link.href}\n`
+                  })
+                }
+                // Optionally include source, can be very long.
+                // responseText += `   Source:\n${email.source}\n` 
               } else {
                 responseText += `   Error: ${email.error}\n`
               }
@@ -507,6 +523,9 @@ function isCopyArgs(args: unknown): args is CopyArgs {
 
 interface ReadEmailRequest {
   messageId: string
+  // These are now part of the tool's input schema, so they should be defined here too.
+  account?: string 
+  mailbox?: string
 }
 
 type CreateDraftArgs = {
@@ -571,7 +590,14 @@ function isReadEmailsArgs(args: unknown): args is ReadEmailsArgs {
 
   if (!Array.isArray(readRequests) || readRequests.length === 0) return false
 
-  return readRequests.every((req) => typeof req === "object" && typeof req.messageId === "string")
+  return readRequests.every((req) => {
+    if (typeof req !== "object" || req === null) return false;
+    const r = req as any; // Use 'as any' to check for optional properties
+    if (typeof r.messageId !== "string") return false;
+    if (r.account !== undefined && typeof r.account !== "string") return false;
+    if (r.mailbox !== undefined && typeof r.mailbox !== "string") return false;
+    return true;
+  });
 }
 
 type MoveArgs = {

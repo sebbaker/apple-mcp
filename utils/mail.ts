@@ -346,6 +346,16 @@ async function listEmails({
     const resultsByMailbox = await Promise.all(emailPromises)
     let allEmails = resultsByMailbox.flat()
 
+    // Deduplicate emails by messageId
+    const seenMessageIds = new Set<string>()
+    allEmails = allEmails.filter((email) => {
+      if (seenMessageIds.has(email.messageId)) {
+        return false
+      }
+      seenMessageIds.add(email.messageId)
+      return true
+    })
+
     allEmails.sort((a, b) => {
       const dateA = a.dateReceived ? new Date(a.dateReceived).getTime() : 0
       const dateB = b.dateReceived ? new Date(b.dateReceived).getTime() : 0
@@ -409,12 +419,20 @@ async function readEmails(readRequests: ReadEmailRequest[]): Promise<ReadEmailDe
       }))
     }
 
+    // Deduplicate read requests by messageId
+    const seenMessageIds = new Set<string>()
+    const uniqueReadRequests = readRequests.filter((req) => {
+      if (seenMessageIds.has(req.messageId)) {
+        return false
+      }
+      seenMessageIds.add(req.messageId)
+      return true
+    })
+
     // Read messages in parallel
     const readMessage = async (request: ReadEmailRequest): Promise<ReadEmailDetails> => {
       return run<ReadEmailDetails>((msgId: string) => {
         const Mail = Application("Mail")
-        if (!Mail.running()) Mail.activate()
-        delay(1)
 
         const allAccounts = Mail.accounts()
         for (const currentAccount of allAccounts) {
@@ -455,8 +473,8 @@ async function readEmails(readRequests: ReadEmailRequest[]): Promise<ReadEmailDe
       }, request.messageId)
     }
 
-    // Read all messages in parallel
-    const readPromises = readRequests.map((request) => readMessage(request))
+    // Read all unique messages in parallel
+    const readPromises = uniqueReadRequests.map((request) => readMessage(request))
     const readResults = await Promise.all(readPromises)
 
     return readResults
@@ -971,7 +989,9 @@ async function trashEmails(
 
       return {
         success: wasSuccessful,
-        message: wasSuccessful ? "Successfully moved message to trash." : "Failed to move message to trash.",
+        message: wasSuccessful
+          ? "Successfully moved message to trash."
+          : "Failed to move message to trash.",
         trashedEmail,
       }
     } catch (error) {
@@ -1034,7 +1054,18 @@ async function listMailboxes(): Promise<MailboxEntry[]> {
         // Some versions of Mail might not have this property
       }
 
-      return mailboxes
+      // Deduplicate mailboxes by account and mailbox combination
+      const seenMailboxKeys = new Set<string>()
+      const uniqueMailboxes = mailboxes.filter((mb) => {
+        const key = `${mb.account}/${mb.mailbox}`
+        if (seenMailboxKeys.has(key)) {
+          return false
+        }
+        seenMailboxKeys.add(key)
+        return true
+      })
+
+      return uniqueMailboxes
     })
   } catch (error) {
     console.error("Error in listMailboxes:", error)

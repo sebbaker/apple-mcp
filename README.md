@@ -63,43 +63,82 @@ To use these tools with Claude Desktop (or a similar MCP-compatible client), you
 
 ## Features
 
-Currently, the primary focus is on interacting with the **Apple Mail** application.
+This MCP server provides comprehensive email management tools for **Apple Mail**. All tools work across multiple email accounts and support various mailbox types.
 
-### Mail Tool (`mail`)
+### Email Management Tools
 
-- **Create Draft Emails:**
-  - Compose new email drafts.
-  - Create replies to existing emails (requires `originalMessageId`).
-  - Optionally include `toAddress`, `subject`, `body`, and an `attachmentPath`.
-- **List Emails:**
-  - Fetch emails from specified accounts and mailboxes.
-  - Defaults to 'Inbox' across all accounts if `mailboxName` is not provided.
-  - Filter emails by:
-    - `searchTerm` (searches subject and sender).
-    - `isRead` status (boolean).
-    - `isFlagged` status (boolean).
-  - Limit the number of results (`limit`, defaults to 25).
-  - Results are sorted by date (newest first).
-  - Fetches emails from multiple mailboxes in parallel for improved performance.
-- **Read Email:**
-  - Retrieve the full content of a specific email using its `messageId`.
-- **Move Email:**
-  - Move an email (specified by `messageId`) to a `targetMailboxName`.
-  - Optionally specify `targetAccountName` if the mailbox name isn't unique.
-- **List Mailboxes:**
-  - List all available mailboxes, prefixed with their account name (e.g., "iCloud/Inbox").
-  - Optionally filter mailboxes by `accountName`.
+#### **Create Draft Emails (`createDraft`)**
+- **Compose new email drafts** with recipient, subject, body, and optional attachments
+- **Create replies to existing emails** by providing the original message ID
+- **Attach files** by specifying absolute file paths
+- Automatically opens the draft in Apple Mail for final editing and sending
 
-## Usage Example (with Claude)
+#### **List Emails (`listEmails`)**
+- **Fetch emails** from specified accounts and mailboxes (defaults to Inbox across all accounts)
+- **Advanced filtering options:**
+  - Search by text in subject and sender
+  - Filter by read/unread status
+  - Filter by flagged status
+  - Limit number of results (default: 25)
+- **Multi-account support** with parallel fetching for improved performance
+- Results sorted by date (newest first)
 
-Once configured, you can ask Claude to use the `apple-mcp` tool. For example:
+#### **Read Email Content (`readEmails`)**
+- **Retrieve full email content** including body text for specific emails
+- **Batch reading** support for multiple emails at once
+- Returns complete email metadata (sender, date, read status, etc.)
 
+#### **List Mailboxes (`listMailboxes`)**
+- **Discover all available mailboxes** across all configured email accounts
+- Shows mailboxes prefixed with account names (e.g., "iCloud/Inbox", "Gmail/Sent")
+- Essential for identifying valid targets for move/copy operations
+
+#### **Move Emails (`move`)**
+- **Move emails between mailboxes** within the same account or across accounts
+- Requires target account and mailbox names (use `listMailboxes` first)
+- Validates target locations before attempting moves
+
+#### **Copy Emails (`copy`)**
+- **Duplicate emails to other mailboxes** while keeping originals in place
+- Useful for organizing emails across multiple folders
+- Supports cross-account copying
+
+#### **Archive Emails (`archive`)**
+- **Archive emails** using Apple Mail's built-in archiving functionality
+- Works with different account types (iCloud, Gmail, Exchange, etc.)
+- Automatically handles account-specific archive locations
+
+#### **Trash Emails (`trash`)**
+- **Move emails to trash** safely and efficiently
+- Respects account-specific trash folder configurations
+
+## Usage Examples (with Claude)
+
+Once configured, you can ask Claude to perform various email management tasks:
+
+**Listing and searching emails:**
 ```
-Using the apple-mcp tool, list my 5 most recent unread emails from my 'Work' account inbox.
+Using the apple-mcp tool, list my 10 most recent unread emails from my work account.
 ```
 
+**Creating drafts:**
 ```
-Using the apple-mcp tool, create a draft email to "example@example.com" with the subject "Meeting Follow-up" and body "Hi team, just following up on our meeting."
+Create a draft email to "team@company.com" with subject "Weekly Update" and body "Hi team, here's this week's progress update..."
+```
+
+**Email organization:**
+```
+Move the email with ID "ABC123" to my "Projects" folder in my work account.
+```
+
+**Reading email content:**
+```
+Show me the full content of the email with ID "XYZ789".
+```
+
+**Discovering mailboxes:**
+```
+List all my available mailboxes so I can see where to organize my emails.
 ```
 
 ## Local Development & Running Manually
